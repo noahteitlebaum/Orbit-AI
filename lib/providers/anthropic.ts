@@ -16,11 +16,12 @@ function toMessage(t: ChatTurn) {
       ],
     };
   }
-  if (t.images?.length && t.role === "user") {
+  if ((t.images?.length || t.documents?.length) && t.role === "user") {
     return {
       role: "user",
       content: [
-        ...t.images.map((i) => ({ type: "image", source: { type: "base64", media_type: i.mime, data: i.data } })),
+        ...(t.documents ?? []).map((d) => ({ type: "document", title: d.name, source: { type: "base64", media_type: d.mime, data: d.data } })),
+        ...(t.images ?? []).map((i) => ({ type: "image", source: { type: "base64", media_type: i.mime, data: i.data } })),
         { type: "text", text: t.content || " " },
       ],
     };

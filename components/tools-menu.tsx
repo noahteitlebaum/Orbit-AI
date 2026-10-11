@@ -70,7 +70,7 @@ export function ToolsMenu(p: {
             <span className={icon}><ClipIcon /></span>
             <span className="min-w-0 flex-1">
               <span className="block text-sm font-medium">Add files</span>
-              <span className="block truncate text-xs text-ink-subtle">PDF, Word, text or images</span>
+              <span className="block truncate text-xs text-ink-subtle">PDF, Word, PowerPoint, Excel, code, images…</span>
             </span>
           </button>
           {p.onFolder && (

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import type { UploadedFile } from "@/lib/files/upload-client";
-import { ACCEPT_ATTR } from "@/lib/files/upload-client";
+import { ACCEPT_ATTR, fileNote } from "@/lib/files/upload-client";
 import { FileChip } from "./file-chip";
 
 // Create / edit a course: name, instructions every chat in it follows, and reusable course files
@@ -77,7 +77,7 @@ export function ProjectDialog({ open, initial, files, onClose, onSave, onDelete,
             <div className="mt-2 flex max-h-48 flex-col gap-1.5 overflow-y-auto">
               {(uploading ?? []).map((n) => <FileChip key={`u-${n}`} name={n} state="uploading" />)}
               {(files ?? []).map((f) => (
-                <FileChip key={f.id} name={f.name} kind={f.kind} state={f.status} detail={f.error ?? (f.pageCount ? `${f.pageCount} pages` : undefined)}
+                <FileChip key={f.id} name={f.name} kind={f.kind} state={f.status} detail={fileNote(f)}
                   onRemove={onDeleteFile ? () => onDeleteFile(f.id) : undefined} wide />
               ))}
               {!files?.length && !uploading?.length && <p className="rounded-xl bg-surface-200 px-3 py-3 text-center text-xs text-ink-subtle">No files yet.</p>}

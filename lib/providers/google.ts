@@ -25,7 +25,11 @@ function toContent(t: ChatTurn) {
   }
   return {
     role: t.role === "assistant" ? "model" : "user",
-    parts: [...(t.images ?? []).map((i) => ({ inlineData: { mimeType: i.mime, data: i.data } })), { text: t.content || " " }],
+    parts: [
+      ...(t.documents ?? []).map((d) => ({ inlineData: { mimeType: d.mime, data: d.data } })),
+      ...(t.images ?? []).map((i) => ({ inlineData: { mimeType: i.mime, data: i.data } })),
+      { text: t.content || " " },
+    ],
   };
 }
 

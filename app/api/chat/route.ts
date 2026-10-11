@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { FOLDER_ACCESS, getModel, isProvider } from "@/config/models";
+import { FOLDER_ACCESS, PDF_INPUT, getModel, isProvider } from "@/config/models";
 import { dbError, isUuid, json, requireAppUser } from "@/lib/api";
 import { isProviderDisabled, overRateLimit, reserve, settle } from "@/lib/billing/budget";
 import { buildContext, costMicros, estimateTokens, maxOutputFor, reservationMicros, STUDY_MODES, systemPrompt, type StudyMode } from "@/lib/chat/context";
@@ -22,7 +22,7 @@ type Body = {
   provider?: unknown; modelId?: unknown; content?: unknown; conversationId?: unknown; projectId?: unknown; retry?: unknown;
   attachmentIds?: unknown; mode?: unknown; courseOnly?: unknown; folder?: unknown; run?: unknown;
 };
-type Row = { id: string; seq: number; role: "user" | "assistant"; content: string; status: string; kind: string; attachment_ids: string[] | null };
+type Row = { id: string; seq: number; role: "user" | "assistant"; content: string; status: string; kind: string; attachment_ids: string[] | null; model_id: string | null };
 
 const MAX_MESSAGE_CHARS = 32_000;
 const MAX_ATTACHMENTS = 10;
@@ -121,7 +121,7 @@ export async function POST(request: Request): Promise<Response> {
   // ---- history
   const { data: rawRows } = await supabase
     .from("messages")
-    .select("id, seq, role, content, status, kind, attachment_ids")
+    .select("id, seq, role, content, status, kind, attachment_ids, model_id")
     .eq("conversation_id", conversation.id)
     .order("seq");
   const rows = ((rawRows ?? []) as Row[]).filter(
@@ -136,11 +136,13 @@ export async function POST(request: Request): Promise<Response> {
     const { data } = await supabase.from("projects").select("name, instructions").eq("id", conversation.project_id).maybeSingle();
     project = data;
   }
+  const imageCount = Math.min(MAX_IMAGES, rows.reduce((n, r) => n + (r.attachment_ids?.length ?? 0), 0));
   const material = await gatherMaterial(supabase, {
     conversationId: conversation.id, projectId: conversation.project_id, question,
     newAttachmentIds: retry ? rows.at(-1)?.attachment_ids ?? [] : linked,
+    pdfInput: PDF_INPUT[provider], imageSlots: Math.max(0, MAX_IMAGES - imageCount),
+    previousQuestion: rows.filter((m) => m.role === "user").at(-2)?.content,
   });
-  const imageCount = Math.min(MAX_IMAGES, rows.reduce((n, r) => n + (r.attachment_ids?.length ?? 0), 0));
 
   const live = liveFor(provider);
   const requestId = randomUUID();
@@ -155,24 +157,33 @@ export async function POST(request: Request): Promise<Response> {
   const promptBase = {
     modelLabel: model.label, projectName: project?.name, projectInstructions: project?.instructions,
     mode: conversation.mode as StudyMode, material: material.block, courseOnly: conversation.course_only,
-    hasFiles: material.hasFiles, unreadable: material.unreadable,
+    hasFiles: material.hasFiles, unreadable: material.unreadable, notes: material.notes,
   };
   const stepsUsed = run?.steps.length ?? 0;
   const tools = folderName && stepsUsed < MAX_TOOL_STEPS ? FOLDER_TOOLS : undefined;
   const runTurns = run ? stepTurns(run.steps) : [];
   const runTokens = runTurns.reduce((n, t) => n + estimateTokens(t.content + JSON.stringify(t.toolCalls ?? t.toolResults ?? "")), 0);
   const folderText = folderName ? folderPrompt(folderName, MAX_TOOL_STEPS - stepsUsed) : "";
-  const baseTokens = estimateTokens(systemPrompt(promptBase) + folderText) + imageCount * IMAGE_TOKENS + runTokens + (tools ? 1500 : 0);
+  const baseTokens = estimateTokens(systemPrompt(promptBase) + folderText) + imageCount * IMAGE_TOKENS + material.visualTokens + runTokens + (tools ? 1500 : 0);
   const ctx = buildContext(history, model.contextTokens - baseTokens - SUMMARY_TOKENS);
 
-  // ---- long chat: fold messages that no longer fit into a running summary (live only; charged like any call)
-  let summary = conversation.summary;
+  // ---- long chat: fold messages that no longer fit into a running summary (live only; charged like any call).
+  // The summary is only sent when older messages are actually left out (a bigger model may see them all).
+  let summary: string | null = null;
   if (ctx.dropped) {
+    summary = conversation.summary;
     const droppedRows = rows.slice(0, rows.length - ctx.turns.length);
     if (live && apiKey) {
+      const ids = [...new Set(droppedRows.flatMap((r) => r.attachment_ids ?? []))];
+      const names = new Map<string, string>();
+      if (ids.length) {
+        const { data: f } = await supabase.from("files").select("id, name").in("id", ids);
+        for (const x of f ?? []) names.set(x.id as string, x.name as string);
+      }
       summary = await updateSummary({
         supabase, userId: user.id, conversationId: conversation.id, provider, apiKey,
-        existing: conversation.summary, existingUpto: conversation.summary_upto, dropped: droppedRows,
+        existing: conversation.summary, existingUpto: conversation.summary_upto,
+        dropped: droppedRows.map((r) => ({ ...r, files: (r.attachment_ids ?? []).map((id) => names.get(id)).filter((n): n is string => Boolean(n)) })),
       });
     }
   }
@@ -180,11 +191,20 @@ export async function POST(request: Request): Promise<Response> {
   // ---- images on the kept turns go to the vision model
   const keptRows = rows.slice(rows.length - ctx.turns.length);
   const images = await loadImages(supabase, keptRows.map((r, i) => ({ messageIndex: i, ids: r.attachment_ids ?? [] })).filter((m) => m.ids.length));
-  const turns: ChatTurn[] = [...ctx.turns.map((t, i) => (images.has(i) ? { ...t, images: images.get(i) } : t)), ...runTurns];
+  // PDF pages to read visually and matching course images go with the question (the newest student message).
+  const questionAt = ctx.turns.map((t) => t.role).lastIndexOf("user");
+  const turns: ChatTurn[] = [
+    ...ctx.turns.map((t, i) => {
+      const withImages = images.has(i) ? { ...t, images: images.get(i) } : t;
+      if (i !== questionAt || (!material.documents.length && !material.images.length)) return withImages;
+      return { ...withImages, documents: material.documents, images: [...(withImages.images ?? []), ...material.images] };
+    }),
+    ...runTurns,
+  ];
 
   const system = [systemPrompt({ ...promptBase, summary }), folderText].filter(Boolean).join("\n\n");
   // Tool definitions count as input too (~1.5k tokens for all of them).
-  const inputTokens = ctx.tokens + runTokens + (tools ? 1500 : 0) + estimateTokens(system) + [...images.values()].flat().length * IMAGE_TOKENS;
+  const inputTokens = ctx.tokens + runTokens + (tools ? 1500 : 0) + estimateTokens(system) + [...images.values()].flat().length * IMAGE_TOKENS + material.visualTokens;
 
   // ---- reservation (live only)
   let maxOutput = model.maxOutputTokens;

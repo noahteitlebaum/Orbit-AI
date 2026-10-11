@@ -28,9 +28,9 @@ export async function GET(_: Request, ctx: RouteContext<"/api/conversations/[id]
 
   // Attachment chips (name, type, status) for each student message.
   const fileIds = [...new Set((rows ?? []).flatMap((m) => (m.attachment_ids as string[] | null) ?? []))];
-  const files = new Map<string, { id: string; name: string; kind: string; status: string; error: string | null }>();
+  const files = new Map<string, { id: string; name: string; kind: string; status: string; error: string | null; project_id: string | null }>();
   if (fileIds.length) {
-    const { data: f } = await auth.supabase.from("files").select("id, name, kind, status, error").in("id", fileIds);
+    const { data: f } = await auth.supabase.from("files").select("id, name, kind, status, error, project_id").in("id", fileIds);
     for (const x of f ?? []) files.set(x.id, x);
   }
 

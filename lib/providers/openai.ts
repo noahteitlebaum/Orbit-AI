@@ -7,11 +7,12 @@ import { decodeBase64, errorForStatus, normalizeTurns, parseArgs, ProviderError,
 function toInput(t: ChatTurn): object[] {
   if (t.toolResults?.length) return t.toolResults.map((r) => ({ type: "function_call_output", call_id: r.id, output: r.output }));
   const items: object[] = [];
-  if (t.images?.length && t.role === "user") {
+  if ((t.images?.length || t.documents?.length) && t.role === "user") {
     items.push({
       role: "user",
       content: [
-        ...t.images.map((i) => ({ type: "input_image", image_url: `data:${i.mime};base64,${i.data}` })),
+        ...(t.documents ?? []).map((d) => ({ type: "input_file", filename: d.name, file_data: `data:${d.mime};base64,${d.data}` })),
+        ...(t.images ?? []).map((i) => ({ type: "input_image", image_url: `data:${i.mime};base64,${i.data}` })),
         { type: "input_text", text: t.content || " " },
       ],
     });

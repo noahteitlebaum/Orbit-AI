@@ -12,7 +12,7 @@ import { ToolsMenu, type StudyMode } from "@/components/tools-menu";
 import { ProjectDialog } from "@/components/project-dialog";
 import { FileChip } from "@/components/file-chip";
 import { AnswerText, SourceList, type Source } from "@/components/answer-text";
-import { ACCEPT_ATTR, uploadFile, type UploadedFile } from "@/lib/files/upload-client";
+import { ACCEPT_ATTR, fileNote, uploadFile, type UploadedFile } from "@/lib/files/upload-client";
 import { FolderDialog } from "@/components/folder-dialog";
 import { FolderActivity, previewFor, type Activity } from "@/components/folder-activity";
 import { loadApprovalMode, loadFolder, permission, runFolderTool, saveApprovalMode, saveFolder, type ApprovalMode, type FolderLink } from "@/lib/folder/browser-fs";
@@ -30,7 +30,7 @@ type Message = {
   modelId?: string;
   status: "complete" | "partial" | "streaming" | "error";
   error?: string; // friendly error text for a failed reply
-  attachments?: { id: string; name: string; kind: string; status: string; error?: string | null }[];
+  attachments?: { id: string; name: string; kind: string; status: string; error?: string | null; project_id?: string | null }[];
   sources?: Source[];
   activity?: Activity[]; // file actions in the connected folder
   toolLog?: ToolLogEntry[]; // saved file actions, as loaded from the server
@@ -349,6 +349,19 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     }
   }
 
+  // A chat attachment saved to the course: every chat in the course can use it, no re-upload needed.
+  async function saveToCourse(messageId: string, ids: string[]) {
+    const course = activeProject;
+    if (!course) return;
+    const ok = await Promise.all(
+      ids.map((id) => fetch(`/api/files/${id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ projectId: course.id }) }).then((r) => r.ok).catch(() => false)),
+    );
+    const saved = ids.filter((_, i) => ok[i]);
+    patchMessages(msgKey, (list) => list.map((x) => (x.id === messageId ? { ...x, attachments: x.attachments?.map((a) => (saved.includes(a.id) ? { ...a, project_id: course.id } : a)) } : x)));
+    loadCourseFiles(course.id);
+    alertLine(saved.length === ids.length ? `Saved to ${course.name}. Every chat in this course can use ${saved.length === 1 ? "it" : "them"}.` : "Couldn't save some files. Try again.");
+  }
+
   async function deleteCourseFile(projectId: string, fileId: string) {
     const res = await fetch(`/api/files/${fileId}`, { method: "DELETE" }).catch(() => null);
     if (res?.ok) setCourseFiles((prev) => ({ ...prev, [projectId]: (prev[projectId] ?? []).filter((f) => f.id !== fileId) }));
@@ -654,7 +667,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     <div className="mb-2 flex flex-wrap gap-2">
       {pending.map((p) => (
         <FileChip key={p.key} name={p.name} kind={p.file?.kind} state={p.uploading ? "uploading" : p.error ? "failed" : p.file!.status}
-          detail={p.error ?? p.file?.error ?? (p.file?.pageCount ? `${p.file.pageCount} pages` : undefined)}
+          detail={p.error ?? (p.file ? fileNote(p.file) : undefined)}
           onRemove={() => setPending((prev) => prev.filter((x) => x.key !== p.key))} />
       ))}
     </div>
@@ -890,8 +903,11 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                   </p>
                 )}
                 <ul className="space-y-8">
-                  {thread.map((m) => {
+                  {thread.map((m, idx) => {
                     const model = getModel(m.modelId);
+                    // Mark where the chat moved to another model, so it's clear who wrote what.
+                    const prevReply = thread.slice(0, idx).reverse().find((x) => x.role === "assistant" && x.kind === "text" && x.modelId);
+                    const switched = m.role === "assistant" && m.kind === "text" && model && prevReply?.modelId && prevReply.modelId !== m.modelId;
                     if (m.role === "user") {
                       return (
                         <li key={m.id} className="flex flex-col items-end gap-2">
@@ -900,12 +916,28 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                               {m.attachments.map((a) => <FileChip key={a.id} name={a.name} kind={a.kind} state={a.status} detail={a.error ?? undefined} />)}
                             </div>
                           )}
+                          {activeProject && (() => {
+                            const unsaved = (m.attachments ?? []).filter((a) => a.status !== "failed" && a.project_id !== activeProject.id);
+                            return unsaved.length > 0 && (
+                              <button type="button" onClick={() => saveToCourse(m.id, unsaved.map((a) => a.id))}
+                                className="text-xs font-medium text-ink-muted underline-offset-[3px] hover:text-ink hover:underline">
+                                Save {unsaved.length === 1 ? "file" : `${unsaved.length} files`} to {activeProject.name}
+                              </button>
+                            );
+                          })()}
                           {m.content && <div className={`max-w-[80%] whitespace-pre-wrap leading-relaxed ${theme.userBubbleClass}`}>{m.content}</div>}
                         </li>
                       );
                     }
                     return (
                       <li key={m.id}>
+                        {switched && (
+                          <div role="separator" className="mb-4 flex items-center gap-3 text-xs text-ink-subtle">
+                            <span className="h-px flex-1 bg-line" />
+                            Switched to {model.label} · it has the chat so far
+                            <span className="h-px flex-1 bg-line" />
+                          </div>
+                        )}
                         <div className="mb-1.5 text-xs font-medium text-ink-subtle">
                           {m.kind === "image" || m.modelId?.endsWith("-image") ? (imageModel?.label ?? "Image") : model?.label}
                         </div>

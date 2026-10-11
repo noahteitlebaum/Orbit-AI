@@ -7,7 +7,7 @@ export function FileChip({ name, kind, state, detail, onRemove, wide }: {
   onRemove?: () => void;
   wide?: boolean;
 }) {
-  const bad = state === "failed" || state === "needs_ocr";
+  const bad = state === "failed"; // scanned (needs_ocr) files are read as page images, so they're fine
   const ext = name.split(".").pop()?.toUpperCase().slice(0, 4) ?? "";
   return (
     <div title={detail ?? name}
@@ -18,7 +18,7 @@ export function FileChip({ name, kind, state, detail, onRemove, wide }: {
       <span className="min-w-0 flex-1">
         <span className="block truncate text-xs font-medium text-ink">{name}</span>
         <span className={`block truncate text-[11px] ${bad ? "text-danger" : "text-ink-subtle"}`}>
-          {state === "uploading" ? "Uploading…" : state === "needs_ocr" ? "Scanned — text can't be read" : state === "failed" ? detail ?? "Couldn't read this file" : detail ?? (kind === "image" ? "Image" : "Ready")}
+          {state === "uploading" ? "Uploading…" : state === "needs_ocr" ? detail ?? "Scanned · read as page images" : state === "failed" ? detail ?? "Couldn't read this file" : detail ?? (kind === "image" ? "Image" : "Ready")}
         </span>
       </span>
       {onRemove && (

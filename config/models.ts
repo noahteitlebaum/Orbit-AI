@@ -88,6 +88,10 @@ export const IMAGE_MODELS: Record<ProviderId, ImageModel | null> = {
   xai: { provider: "xai", label: "Grok Imagine", apiModel: "grok-imagine-image-2.0", pricePerImage: 0.04 },
 };
 
+// Which apps can read PDF pages visually (scanned pages, diagrams): the PDF itself is sent to the model.
+// xAI's chat API takes images but not PDFs, so Grok is told which pages it can't see.
+export const PDF_INPUT: Record<ProviderId, boolean> = { openai: true, anthropic: true, google: true, xai: false };
+
 // Folder access (browser folder picker + file tools). All four APIs support function calling; switch one off here if needed.
 export const FOLDER_ACCESS: Record<ProviderId, boolean> = { openai: true, anthropic: true, google: true, xai: true };
 

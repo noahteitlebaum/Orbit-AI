@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { fakeSupabase } from "@/test/fake-supabase";
 import type { StreamEvent } from "@/lib/providers/types";
@@ -178,12 +179,24 @@ describe("POST /api/chat", () => {
       expect(state.fake!.db.conversations[0].course_only).toBe(true);
     });
 
-    it("scanned PDFs are named to the model as unreadable", async () => {
+    it("scanned PDFs are read visually: their pages go to the model as a PDF, with page references", async () => {
       state.live = true;
-      const f = seedFile({ status: "needs_ocr", name: "scan.pdf" });
+      const f = seedFile({ status: "needs_ocr", name: "scan.pdf", char_count: 0, page_count: 1, visual_pages: [1], storage_path: "u/scan.pdf" });
+      state.fake!.storage["u/scan.pdf"] = { bytes: new Uint8Array(readFileSync(new URL("../../../test/fixtures/scanned.pdf", import.meta.url))), type: "application/pdf" };
+      await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "read it", attachmentIds: [f.id] })));
+      const last = state.lastArgs!.history.at(-1)! as { documents?: { name: string; data: string }[] };
+      expect(last.documents).toHaveLength(1);
+      expect(last.documents![0].name).toBe("scan.pdf (pages 1)");
+      expect(Buffer.from(last.documents![0].data, "base64").subarray(0, 5).toString()).toBe("%PDF-");
+      expect(state.lastArgs!.system).toContain("[S1] scan.pdf, p. 1");
+    });
+
+    it("failed files are named to the model as unreadable", async () => {
+      state.live = true;
+      const f = seedFile({ status: "failed", name: "broken.pdf" });
       await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "read it", attachmentIds: [f.id] })));
       expect(state.lastArgs!.system).toContain("couldn't be read");
-      expect(state.lastArgs!.system).toContain("scan.pdf");
+      expect(state.lastArgs!.system).toContain("broken.pdf");
     });
 
     it("images attached to the message go to the vision model", async () => {
@@ -259,5 +272,55 @@ describe("folder tools", () => {
     expect(await bad({ replyId: crypto.randomUUID(), steps: good })).toBe(400);
     expect(await bad({ replyId: first.at(-1).replyId, steps: [{ ...good[0], calls: [{ ...readCall, name: "run_shell" }] }] })).toBe(400);
     expect(await bad({ replyId: first.at(-1).replyId, steps: [{ ...good[0], results: [{ id: "other", output: "x" }] }] })).toBe(400);
+  });
+});
+
+describe("persistent chats and model switching", () => {
+  async function ask(body: Record<string, unknown>) {
+    return readEvents(await POST(req({ provider: "anthropic", ...body })));
+  }
+
+  it("switching models mid-chat: the new model gets the earlier turns and files; each reply keeps its model", async () => {
+    state.live = true;
+    const f1 = crypto.randomUUID();
+    state.fake!.db.files.push({ id: f1, user_id: "user-1", name: "lecture3.pdf", kind: "document", status: "ready", char_count: 50, page_count: 1, project_id: null, conversation_id: null, storage_path: "p", mime: "application/pdf", visual_pages: [], image_count: 0 });
+    state.fake!.db.file_chunks.push({ id: "c1", file_id: f1, page: 1, chunk_index: 0, content: "Stratified sampling splits a population into strata." });
+    state.events = [{ delta: "Strata are subgroups." }, { usage: { input: 10, output: 5, reasoning: 0, cached: 0 } }];
+    const first = await ask({ modelId: "anthropic-default", content: "What are strata?", attachmentIds: [f1] });
+    const conversationId = first[0].conversationId;
+
+    state.events = [{ delta: "Deeper answer." }, { usage: { input: 10, output: 5, reasoning: 0, cached: 0 } }];
+    await ask({ modelId: "anthropic-opus", content: "Go deeper", conversationId });
+
+    const h = state.lastArgs!.history;
+    expect(h.map((t) => [t.role, t.content])).toEqual([["user", "What are strata?"], ["assistant", "Strata are subgroups."], ["user", "Go deeper"]]);
+    expect(state.lastArgs!.system).toContain("You are Claude Opus 5.5");
+    expect(state.lastArgs!.system).toContain("Stratified sampling splits"); // the file still reaches the new model
+    const replies = state.fake!.db.messages.filter((m) => m.role === "assistant");
+    expect(replies.map((m) => m.model_id)).toEqual(["anthropic-default", "anthropic-opus"]);
+    expect(state.fake!.db.messages.find((m) => m.content === "What are strata?")!.attachment_ids).toEqual([f1]);
+  });
+
+  it("long chats keep recent messages and a structured summary of the rest; short ones get no summary", async () => {
+    state.live = true;
+    state.fake!.db.conversations.push({ id: "11111111-1111-4111-8111-111111111111", user_id: "user-1", provider: "anthropic", title: "t", project_id: null, mode: "chat", course_only: false, summary: "Goal: old summary", summary_upto: null });
+    const conversationId = "11111111-1111-4111-8111-111111111111";
+    // ~80 messages of ~3k chars: more than the 60k-token window. (Negative seq: older than anything inserted next.)
+    for (let i = 0; i < 80; i++) {
+      state.fake!.db.messages.push({ id: crypto.randomUUID(), seq: i - 1000, conversation_id: conversationId, user_id: "user-1", role: i % 2 ? "assistant" : "user", content: `msg ${i} ${"z".repeat(3000)}`, status: "complete", kind: "text", attachment_ids: [], model_id: "anthropic-default" });
+    }
+    state.events = [{ delta: "Goal: new summary" }, { usage: { input: 10, output: 5, reasoning: 0, cached: 0 } }];
+    const events = await ask({ modelId: "anthropic-default", content: "and now?", conversationId });
+    expect(events[0]).toMatchObject({ t: "meta", dropped: true, summarized: true });
+    expect(state.lastArgs!.system).toContain("Summary of earlier parts of this chat");
+    expect(state.lastArgs!.history.at(-1)!.content).toBe("and now?");
+    const conv = state.fake!.db.conversations[0];
+    expect(conv.summary).toBe("Goal: new summary");
+    expect(conv.summary_upto as number).toBeGreaterThan(-1000);
+
+    // A short chat with an old summary doesn't send it (everything fits).
+    state.fake!.db.conversations.push({ id: "22222222-2222-4222-8222-222222222222", user_id: "user-1", provider: "anthropic", title: "s", project_id: null, mode: "chat", course_only: false, summary: "stale", summary_upto: 1 });
+    await ask({ modelId: "anthropic-default", content: "hi", conversationId: "22222222-2222-4222-8222-222222222222" });
+    expect(state.lastArgs!.system).not.toContain("stale");
   });
 });

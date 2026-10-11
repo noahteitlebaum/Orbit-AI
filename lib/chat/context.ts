@@ -73,6 +73,7 @@ export function systemPrompt(o: {
   courseOnly?: boolean;
   hasFiles?: boolean;
   unreadable?: string[];
+  notes?: string[];         // visual material that wasn't shown (lib/chat/material.ts)
   summary?: string | null;  // summary of earlier messages that no longer fit
 }): string {
   const parts = [`${BASE_SYSTEM_PROMPT}\nYou are ${o.modelLabel}.`];
@@ -81,7 +82,10 @@ export function systemPrompt(o: {
   if (o.mode && MODE_PROMPTS[o.mode]) parts.push(MODE_PROMPTS[o.mode]);
   if (o.summary) parts.push(`Summary of earlier parts of this chat (older messages aren't shown to you):\n${o.summary}`);
   if (o.unreadable?.length) {
-    parts.push(`These uploaded files couldn't be read (scanned or unsupported), so you can't see their contents: ${o.unreadable.join(", ")}. Tell the student if they ask about them.`);
+    parts.push(`These uploaded files couldn't be read, so you can't see their contents: ${o.unreadable.join(", ")}. Tell the student if they ask about them.`);
+  }
+  if (o.notes?.length) {
+    parts.push(`About the student's files (tell the student plainly when something you need wasn't available; never guess what a page or picture shows):\n- ${o.notes.join("\n- ")}`);
   }
   if (o.material) {
     parts.push(

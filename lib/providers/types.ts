@@ -3,11 +3,13 @@ import type { ToolDef } from "@/lib/folder/tools";
 
 // Provider-neutral shapes (see docs/ARCHITECTURE.md). Server-only.
 export type TurnImage = { mime: string; data: string }; // base64
+/** A PDF the model reads page by page (text and visuals). Only for providers with PDF_INPUT in config/models.ts. */
+export type TurnDocument = { name: string; mime: "application/pdf"; data: string }; // base64
 /** A function call the model made. `meta` carries provider data that must be sent back (Gemini thought signatures). */
 export type ToolCall = { id: string; name: string; args: Record<string, unknown>; meta?: { thoughtSignature?: string; providerId?: boolean } };
 export type ToolResult = { id: string; name: string; output: string };
 // Assistant turns may carry toolCalls; the user turn after them carries the matching toolResults.
-export type ChatTurn = { role: "user" | "assistant"; content: string; images?: TurnImage[]; toolCalls?: ToolCall[]; toolResults?: ToolResult[] };
+export type ChatTurn = { role: "user" | "assistant"; content: string; images?: TurnImage[]; documents?: TurnDocument[]; toolCalls?: ToolCall[]; toolResults?: ToolResult[] };
 
 export interface Usage {
   input: number;     // prompt tokens
@@ -68,7 +70,7 @@ export function errorForStatus(status: number): ProviderError {
 export function normalizeTurns(history: ChatTurn[]): ChatTurn[] {
   const out: ChatTurn[] = [];
   for (const t of history) {
-    if (!t.content.trim() && !t.images?.length && !t.toolCalls?.length && !t.toolResults?.length) continue;
+    if (!t.content.trim() && !t.images?.length && !t.documents?.length && !t.toolCalls?.length && !t.toolResults?.length) continue;
     if (out.length === 0 && t.role === "assistant") continue;
     const last = out[out.length - 1];
     // Never merge across tool calls/results: each provider pairs them by position.
@@ -76,7 +78,8 @@ export function normalizeTurns(history: ChatTurn[]): ChatTurn[] {
     if (last && last.role === t.role && !tooly) {
       last.content = [last.content, t.content].filter(Boolean).join("\n\n");
       if (t.images?.length) last.images = [...(last.images ?? []), ...t.images];
-    } else out.push({ ...t, images: t.images ? [...t.images] : undefined });
+      if (t.documents?.length) last.documents = [...(last.documents ?? []), ...t.documents];
+    } else out.push({ ...t, images: t.images ? [...t.images] : undefined, documents: t.documents ? [...t.documents] : undefined });
   }
   return out;
 }
