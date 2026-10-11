@@ -1,11 +1,32 @@
 import { readSse } from "./sse";
-import { decodeBase64, errorForStatus, normalizeTurns, ProviderError, type ProviderAdapter } from "./types";
+import { decodeBase64, errorForStatus, normalizeTurns, parseArgs, ProviderError, toolSchema, type ChatTurn, type ProviderAdapter } from "./types";
 
-// xAI (OpenAI-compatible Chat Completions, streaming) + Imagine image generation.
+// xAI (OpenAI-compatible Chat Completions, streaming, function calling) + Imagine image generation.
+
+function toMessages(t: ChatTurn): object[] {
+  if (t.toolResults?.length) return t.toolResults.map((r) => ({ role: "tool", tool_call_id: r.id, content: r.output }));
+  if (t.toolCalls?.length) {
+    return [{
+      role: "assistant",
+      content: t.content || null,
+      tool_calls: t.toolCalls.map((c) => ({ id: c.id, type: "function", function: { name: c.name, arguments: JSON.stringify(c.args) } })),
+    }];
+  }
+  if (t.images?.length && t.role === "user") {
+    return [{
+      role: "user",
+      content: [
+        ...t.images.map((i) => ({ type: "image_url", image_url: { url: `data:${i.mime};base64,${i.data}` } })),
+        { type: "text", text: t.content || " " },
+      ],
+    }];
+  }
+  return [{ role: t.role, content: t.content }];
+}
 export const xai: ProviderAdapter = {
   id: "xai",
 
-  async *stream({ model, system, history, maxOutput, apiKey, signal }) {
+  async *stream({ model, system, history, maxOutput, apiKey, signal, tools }) {
     const res = await fetch("https://api.x.ai/v1/chat/completions", {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
@@ -13,18 +34,9 @@ export const xai: ProviderAdapter = {
         model: model.apiModel,
         messages: [
           { role: "system", content: system },
-          ...normalizeTurns(history).map((t) =>
-            t.images?.length && t.role === "user"
-              ? {
-                  role: "user",
-                  content: [
-                    ...t.images.map((i) => ({ type: "image_url", image_url: { url: `data:${i.mime};base64,${i.data}` } })),
-                    { type: "text", text: t.content || " " },
-                  ],
-                }
-              : { role: t.role, content: t.content },
-          ),
+          ...normalizeTurns(history).flatMap(toMessages),
         ],
+        ...(tools?.length ? { tools: tools.map((t) => ({ type: "function", function: toolSchema(t) })) } : {}),
         max_tokens: maxOutput,
         stream: true,
         stream_options: { include_usage: true },
@@ -33,12 +45,21 @@ export const xai: ProviderAdapter = {
     });
     if (!res.ok || !res.body) throw errorForStatus(res.status);
 
+    const calls = new Map<number, { id: string; name: string; args: string }>(); // streamed in pieces, keyed by index
     for await (const { data } of readSse(res.body)) {
       if (data === "[DONE]") break;
       const ev = JSON.parse(data);
       if (ev.error) throw new ProviderError("unavailable", undefined, true);
       const delta = ev.choices?.[0]?.delta?.content;
       if (delta) yield { delta: delta as string };
+      for (const tc of ev.choices?.[0]?.delta?.tool_calls ?? []) {
+        const i = typeof tc.index === "number" ? tc.index : calls.size;
+        const c = calls.get(i) ?? { id: "", name: "", args: "" };
+        if (tc.id) c.id = tc.id;
+        if (tc.function?.name) c.name += tc.function.name;
+        if (tc.function?.arguments) c.args += tc.function.arguments;
+        calls.set(i, c);
+      }
       if (ev.usage) {
         const reasoning = ev.usage.completion_tokens_details?.reasoning_tokens ?? 0;
         yield {
@@ -51,6 +72,9 @@ export const xai: ProviderAdapter = {
           },
         };
       }
+    }
+    for (const [i, c] of [...calls.entries()].sort((a, b) => a[0] - b[0])) {
+      yield { toolCall: { id: c.id || `call_${i}`, name: c.name, args: parseArgs(c.args) } };
     }
   },
 

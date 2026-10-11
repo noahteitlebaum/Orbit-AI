@@ -74,3 +74,11 @@ Store money as integer micro-cents (or numeric) to avoid float rounding.
 
 ## Security checklist
 Keys only in server env. RLS plus server checks on every read and write. Exact domain match after normalization (lowercase, trim; reject unicode lookalikes). CSRF and auth on all mutation routes. Rate-limit OTP sends.
+
+## Folder access (browser)
+The student picks a folder with the browser's folder picker (File System Access API, Chrome/Edge on a computer) and
+allows editing in the browser's prompt. The handle is remembered in IndexedDB; the browser may ask again next visit.
+Chat requests send `folder: { name }`, and adapters pass the tools from `lib/folder/tools.ts` in each provider's
+function-calling format. A round that ends in tool calls streams `tool_calls`; the browser runs them on the folder
+(`lib/folder/browser-fs.ts`; changes need Apply unless "Don't ask for edits", deletes always ask; nothing extra is written
+into the folder) and continues the same reply with `run: { replyId, steps }`. Every round is its own reserve → call → settle.

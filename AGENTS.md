@@ -3,7 +3,7 @@
 Read this first in every AI session. Also read `docs/PRODUCT_SPEC.md`, `docs/ARCHITECTURE.md`, and `docs/TASKS.md`. If anything here conflicts with a direct instruction from Noah, follow Noah and update this file.
 
 ## What this is
-A mobile-friendly web app that gives verified @uwo.ca students one place to use OpenAI, Anthropic (Claude), Google (Gemini) and xAI (Grok). Each AI app (ChatGPT, Claude, Gemini, Grok) has its own chat list; inside a chat, students can switch between that app's models and keep the context. Chats never carry over between apps (Noah, Oct 2026); courses (files + instructions) are shared by all four apps. **Launch: Monday Oct 19 2026.**
+A mobile-friendly web app that gives verified @uwo.ca students one place to use OpenAI, Anthropic (Claude), Google (Gemini) and xAI (Grok). Each AI app (ChatGPT, Claude, Gemini, Grok) has its own chat list; inside a chat, students can switch between that app's models and keep the context. Chats and courses never carry over between apps: each app has its own chats and its own courses (Noah, Oct 2026). **Launch: Monday Oct 19 2026.**
 
 ## Stack (provisional; change it here if it changes)
 - Next.js (App Router) + TypeScript + Tailwind
@@ -37,16 +37,17 @@ npm run test:live  # small opt-in live checks against all 4 providers (costs mon
 10. Use synthetic accounts and data only. Never use real student chats in prompts, tests or screenshots.
 
 ## Out of scope for launch (don't build unless the team agrees)
-Model comparison, smart model routing, connectors (Drive/GitHub…), coding/computer agents, web search, code execution, voice, saved memories.
-**Built (Noah + Jake's backend memo, Oct 2026):** file/image uploads with page references, courses (shared by all four apps: instructions + reusable files), grounded answers with [S#] sources and a "use only my course material" switch, study modes (explain / quiz me / hints), running summaries for long chats, low-balance warning with a cheaper-model offer, image generation (Gemini, Grok; OpenAI once its price is set). Everything that calls a model goes through the same reserve → call → settle budget path.
+Model comparison, smart model routing, connectors (Drive/GitHub…), coding/computer agents beyond folder access, web search, code execution, voice, saved memories.
+**Built (Noah + Jake's backend memo, Oct 2026):** file/image uploads with page references, courses (one app each: instructions + reusable files), grounded answers with [S#] sources and a "use only my course material" switch, study modes (explain / quiz me / hints), running summaries for long chats, low-balance warning with a cheaper-model offer, image generation (Gemini, Grok; OpenAI once its price is set). **Folder access (Noah, Oct 11 2026):** students can connect one folder on their computer with the browser's folder picker (File System Access API, Chrome/Edge; nothing to install; `lib/folder/browser-fs.ts`); all four AIs can list/read/search and write/edit/move/delete files there; changes need the student's Apply unless they chose "Don't ask for edits" (deletes always ask). Everything that calls a model goes through the same reserve → call → settle budget path, including each round of a file-action reply.
 
 ## Where things live (server)
-- `supabase/migrations/0001_core.sql`, `0002_files_courses.sql` — tables, RLS, budget functions (secret key only), `search_chunks` keyword search, private `uploads` + `generated` buckets. Money is in micros (millionths of $).
+- `supabase/migrations/0001_core.sql` … `0004_folder_tools.sql` (run in order) — tables, RLS, budget functions (secret key only), `search_chunks` keyword search, private `uploads` + `generated` buckets. Money is in micros (millionths of $).
 - `lib/providers/*` — one adapter per provider (fetch + SSE, no SDKs; text + image input). `LIVE_MODELS=on` turns on real calls; otherwise demo replies at no cost.
 - `lib/files/extract.ts` — PDF (per page) / DOCX / TXT text extraction and chunking; scanned PDFs are flagged `needs_ocr`, never silently accepted. `lib/files/upload-client.ts` uploads browser → Storage directly (avoids Vercel's 4.5 MB request limit), then `POST /api/files` indexes it.
 - `lib/chat/context.ts` — context policy, cost maths, system prompt (modes, course material, course-only). `lib/chat/material.ts` — picks passages ([S#]) from chat attachments + course files and loads images for vision. `lib/chat/summary.ts` — running summary of messages that no longer fit (cheapest model, budgeted).
 - `app/api/chat` (NDJSON stream), `app/api/files`, `app/api/images`, `app/api/conversations`, `app/api/projects` (courses), `app/api/usage`.
-- `config/models.ts` — model ids, prices, context caps, image models. Prices checked Oct 5 2026; re-check before launch.
+- `lib/folder/*` — folder tools (definitions, limits, prompt), tool-run validation (`run.ts`) and the tools themselves, run in the browser on the student's folder (`browser-fs.ts`).
+- `config/models.ts` — model ids, prices, context caps, image models, `FOLDER_ACCESS` per app. Prices checked Oct 5 2026; re-check before launch.
 - Sources shown to students are only passages the answer actually cited and that were really sent (`citedSources`).
 
 ## How to work

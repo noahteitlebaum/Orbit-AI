@@ -1,21 +1,26 @@
 import { randomUUID } from "node:crypto";
-import { getModel, isProvider } from "@/config/models";
+import { FOLDER_ACCESS, getModel, isProvider } from "@/config/models";
 import { dbError, isUuid, json, requireAppUser } from "@/lib/api";
 import { isProviderDisabled, overRateLimit, reserve, settle } from "@/lib/billing/budget";
 import { buildContext, costMicros, estimateTokens, maxOutputFor, reservationMicros, STUDY_MODES, systemPrompt, type StudyMode } from "@/lib/chat/context";
 import { citedSources, gatherMaterial, IMAGE_TOKENS, loadImages, MAX_IMAGES, type Source } from "@/lib/chat/material";
 import { SUMMARY_TOKENS, updateSummary } from "@/lib/chat/summary";
 import { ADAPTERS, apiKeyFor, liveFor } from "@/lib/providers";
-import { ProviderError, type ChatTurn, type StreamEvent, type Usage } from "@/lib/providers/types";
+import { ProviderError, type ChatTurn, type StreamEvent, type ToolCall, type Usage } from "@/lib/providers/types";
+import { FOLDER_TOOLS, folderPrompt, MAX_CALLS_PER_STEP, MAX_TOOL_STEPS } from "@/lib/folder/tools";
+import { parseSteps, stepTurns, toolLog, type Step } from "@/lib/folder/run";
 
 // POST /api/chat — auth → ownership → gates → context (+ course material, images, summary) → reserve → stream → reconcile → save.
-// Body: { provider, modelId, content, conversationId?, projectId?, retry?, attachmentIds?, mode?, courseOnly? }
-// Response: newline-delimited JSON events: meta, delta…, then done (with cited sources) or error.
+// Body: { provider, modelId, content, conversationId?, projectId?, retry?, attachmentIds?, mode?, courseOnly?, folder?, run? }
+//   folder: { name } — the student connected a folder in the browser, so the model gets file tools.
+//   run: { replyId, steps } — continue a reply after the browser ran the model's tool calls (see lib/folder/run.ts).
+// Response: newline-delimited JSON events: meta, delta…, then done (with cited sources), tool_calls (browser runs
+// them, then calls again with run), or error.
 export const maxDuration = 300;
 
 type Body = {
   provider?: unknown; modelId?: unknown; content?: unknown; conversationId?: unknown; projectId?: unknown; retry?: unknown;
-  attachmentIds?: unknown; mode?: unknown; courseOnly?: unknown;
+  attachmentIds?: unknown; mode?: unknown; courseOnly?: unknown; folder?: unknown; run?: unknown;
 };
 type Row = { id: string; seq: number; role: "user" | "assistant"; content: string; status: string; kind: string; attachment_ids: string[] | null };
 
@@ -33,9 +38,22 @@ export async function POST(request: Request): Promise<Response> {
   const model = getModel(typeof body.modelId === "string" ? body.modelId : undefined);
   if (!model || !model.enabled || model.provider !== provider) return json({ error: "unknown_model" }, 400);
   const retry = body.retry === true;
+
+  // ---- folder tools + tool-run continuation
+  const folderName =
+    FOLDER_ACCESS[provider] && body.folder && typeof body.folder === "object" && typeof (body.folder as { name?: unknown }).name === "string"
+      ? (body.folder as { name: string }).name.replace(/[\r\n"]/g, " ").trim().slice(0, 100) || "folder"
+      : null;
+  let run: { replyId: string; steps: Step[] } | null = null;
+  if (body.run !== undefined) {
+    const r = body.run as { replyId?: unknown; steps?: unknown } | null;
+    const steps = parseSteps(r?.steps);
+    if (!r || !isUuid(r.replyId) || !steps || !isUuid(body.conversationId) || retry) return json({ error: "bad_request" }, 400);
+    run = { replyId: r.replyId, steps };
+  }
   const content = typeof body.content === "string" ? body.content.trim() : "";
   const attachmentIds = Array.isArray(body.attachmentIds) ? body.attachmentIds.filter(isUuid).slice(0, MAX_ATTACHMENTS) : [];
-  if (!retry && !content && !attachmentIds.length) return json({ error: "empty_message" }, 400);
+  if (!run && !retry && !content && !attachmentIds.length) return json({ error: "empty_message" }, 400);
   if (content.length > MAX_MESSAGE_CHARS) return json({ error: "message_too_long" }, 400);
 
   // ---- conversation (RLS: only the user's own rows are visible or writable)
@@ -66,7 +84,7 @@ export async function POST(request: Request): Promise<Response> {
 
   // ---- attachments: only the student's own, not-yet-used uploads; they now belong to this chat
   let linked: string[] = [];
-  if (attachmentIds.length && !retry) {
+  if (attachmentIds.length && !retry && !run) {
     const { data } = await supabase.from("files").select("id").in("id", attachmentIds).is("project_id", null).is("conversation_id", null);
     linked = (data ?? []).map((f) => f.id as string);
     if (linked.length) await supabase.from("files").update({ conversation_id: conversation.id }).in("id", linked);
@@ -74,7 +92,17 @@ export async function POST(request: Request): Promise<Response> {
 
   // ---- the student's message (or, on retry, drop the failed reply and reuse the last question)
   let userMessageId: string;
-  if (retry) {
+  let priorText = ""; // reply text from earlier rounds of a tool run
+  if (run) {
+    const { data: msgs } = await supabase.from("messages").select("id, role, seq, content").eq("conversation_id", conversation.id).order("seq");
+    const list = msgs ?? [];
+    const reply = list.at(-1);
+    const lastUser = [...list].reverse().find((m) => m.role === "user");
+    // Only the newest reply can be continued.
+    if (!reply || reply.id !== run.replyId || reply.role !== "assistant" || !lastUser) return json({ error: "bad_request" }, 400);
+    userMessageId = lastUser.id;
+    priorText = reply.content ?? "";
+  } else if (retry) {
     const { data: msgs } = await supabase.from("messages").select("id, role, seq").eq("conversation_id", conversation.id).eq("kind", "text").order("seq");
     const lastUser = [...(msgs ?? [])].reverse().find((m) => m.role === "user");
     if (!lastUser) return json({ error: "nothing_to_retry" }, 400);
@@ -96,7 +124,9 @@ export async function POST(request: Request): Promise<Response> {
     .select("id, seq, role, content, status, kind, attachment_ids")
     .eq("conversation_id", conversation.id)
     .order("seq");
-  const rows = ((rawRows ?? []) as Row[]).filter((m) => m.kind === "text" && m.status !== "error" && (m.content || m.attachment_ids?.length));
+  const rows = ((rawRows ?? []) as Row[]).filter(
+    (m) => m.kind === "text" && m.status !== "error" && m.id !== run?.replyId && (m.content || m.attachment_ids?.length),
+  );
   const history: ChatTurn[] = rows.map((m) => ({ role: m.role, content: m.content }));
   const question = [...rows].reverse().find((m) => m.role === "user")?.content ?? content;
 
@@ -127,7 +157,12 @@ export async function POST(request: Request): Promise<Response> {
     mode: conversation.mode as StudyMode, material: material.block, courseOnly: conversation.course_only,
     hasFiles: material.hasFiles, unreadable: material.unreadable,
   };
-  const baseTokens = estimateTokens(systemPrompt(promptBase)) + imageCount * IMAGE_TOKENS;
+  const stepsUsed = run?.steps.length ?? 0;
+  const tools = folderName && stepsUsed < MAX_TOOL_STEPS ? FOLDER_TOOLS : undefined;
+  const runTurns = run ? stepTurns(run.steps) : [];
+  const runTokens = runTurns.reduce((n, t) => n + estimateTokens(t.content + JSON.stringify(t.toolCalls ?? t.toolResults ?? "")), 0);
+  const folderText = folderName ? folderPrompt(folderName, MAX_TOOL_STEPS - stepsUsed) : "";
+  const baseTokens = estimateTokens(systemPrompt(promptBase) + folderText) + imageCount * IMAGE_TOKENS + runTokens + (tools ? 1500 : 0);
   const ctx = buildContext(history, model.contextTokens - baseTokens - SUMMARY_TOKENS);
 
   // ---- long chat: fold messages that no longer fit into a running summary (live only; charged like any call)
@@ -145,10 +180,11 @@ export async function POST(request: Request): Promise<Response> {
   // ---- images on the kept turns go to the vision model
   const keptRows = rows.slice(rows.length - ctx.turns.length);
   const images = await loadImages(supabase, keptRows.map((r, i) => ({ messageIndex: i, ids: r.attachment_ids ?? [] })).filter((m) => m.ids.length));
-  const turns: ChatTurn[] = ctx.turns.map((t, i) => (images.has(i) ? { ...t, images: images.get(i) } : t));
+  const turns: ChatTurn[] = [...ctx.turns.map((t, i) => (images.has(i) ? { ...t, images: images.get(i) } : t)), ...runTurns];
 
-  const system = systemPrompt({ ...promptBase, summary });
-  const inputTokens = ctx.tokens + estimateTokens(system) + [...images.values()].flat().length * IMAGE_TOKENS;
+  const system = [systemPrompt({ ...promptBase, summary }), folderText].filter(Boolean).join("\n\n");
+  // Tool definitions count as input too (~1.5k tokens for all of them).
+  const inputTokens = ctx.tokens + runTokens + (tools ? 1500 : 0) + estimateTokens(system) + [...images.values()].flat().length * IMAGE_TOKENS;
 
   // ---- reservation (live only)
   let maxOutput = model.maxOutputTokens;
@@ -168,13 +204,19 @@ export async function POST(request: Request): Promise<Response> {
     }
   }
 
-  // ---- placeholder reply row, then stream
-  const { data: replyRow } = await supabase
-    .from("messages")
-    .insert({ conversation_id: conversation.id, user_id: user.id, role: "assistant", content: "", model_id: model.id, status: "partial" })
-    .select("id")
-    .single();
-  const replyId = replyRow?.id ?? randomUUID();
+  // ---- placeholder reply row (a tool run keeps adding to the same one), then stream
+  let replyId: string;
+  if (run) {
+    replyId = run.replyId;
+    await supabase.from("messages").update({ model_id: model.id, status: "partial" }).eq("id", replyId);
+  } else {
+    const { data: replyRow } = await supabase
+      .from("messages")
+      .insert({ conversation_id: conversation.id, user_id: user.id, role: "assistant", content: "", model_id: model.id, status: "partial" })
+      .select("id")
+      .single();
+    replyId = replyRow?.id ?? randomUUID();
+  }
 
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
@@ -196,42 +238,50 @@ export async function POST(request: Request): Promise<Response> {
         attachmentIds: linked,
       });
 
-      let text = "";
-      let shown = ""; // what the student actually saw (if they pressed Stop)
+      let text = priorText;
+      let shown = priorText; // what the student actually saw (if they pressed Stop)
       let usage: Usage | undefined;
+      const calls: ToolCall[] = [];
       let failure: ProviderError | null = null;
       try {
         const events = live
-          ? ADAPTERS[provider].stream({ model, system, history: turns, maxOutput, apiKey: apiKey!, signal: AbortSignal.timeout(240_000) })
+          ? ADAPTERS[provider].stream({ model, system, history: turns, maxOutput, apiKey: apiKey!, signal: AbortSignal.timeout(240_000), tools })
           : mockStream(model.label, history, ctx.dropped, material.sources, conversation.mode);
         for await (const ev of events) {
           if (ev.delta) {
-            text += ev.delta;
+            // Later rounds of a tool run continue the same reply, as a new paragraph.
+            const v = text && text === priorText && !/\s$/.test(text) ? `\n\n${ev.delta}` : ev.delta;
+            text += v;
             if (!clientGone) shown = text;
-            send({ t: "delta", v: ev.delta });
+            send({ t: "delta", v });
           }
+          if (ev.toolCall && tools && calls.length < MAX_CALLS_PER_STEP) calls.push(ev.toolCall);
           if (ev.usage) usage = ev.usage;
           // If the student stopped, keep reading (server-side) so the provider reports real usage and we charge
           // the actual cost instead of the full reservation.
         }
       } catch (e) {
-        failure = e instanceof ProviderError ? e : new ProviderError((e as Error)?.name === "TimeoutError" ? "timeout" : "unknown", undefined, text.length > 0);
+        failure = e instanceof ProviderError ? e : new ProviderError((e as Error)?.name === "TimeoutError" ? "timeout" : "unknown", undefined, text.length > priorText.length);
       }
 
       const stopped = clientGone && !failure;
       const finalText = stopped ? shown : text;
-      const status = failure ? "error" : stopped ? "partial" : "complete";
+      const wantsTools = !failure && !stopped && calls.length > 0;
+      const status = failure ? "error" : stopped || wantsTools ? "partial" : "complete";
       const sources = citedSources(finalText, material.sources);
       await supabase.from("messages").update({ content: finalText, status, sources: sources.length ? sources : null }).eq("id", replyId);
       await supabase.from("conversations").update({ updated_at: new Date().toISOString() }).eq("id", conversation.id);
+      // File activity shown under the reply (needs migration 0004; skipped quietly if it hasn't been run).
+      if (run) await supabase.from("messages").update({ tool_log: toolLog(run.steps) }).eq("id", replyId);
 
       if (live) {
         if (usage) await settle(requestId, "settled", costMicros(model, usage), usage, failure?.code);
-        else if (failure && !failure.started && text.length === 0) await settle(requestId, "released", 0, undefined, failure.code);
+        else if (failure && !failure.started && text.length === priorText.length) await settle(requestId, "released", 0, undefined, failure.code);
         else await settle(requestId, "uncertain", 0, undefined, failure?.code ?? "no_usage");
       }
 
       if (failure) send({ t: "error", code: failure.code });
+      else if (wantsTools) send({ t: "tool_calls", replyId, text: text.slice(priorText.length).trim(), calls });
       else send({ t: "done", status, sources });
       try {
         controller.close();

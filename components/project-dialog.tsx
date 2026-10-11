@@ -54,7 +54,7 @@ export function ProjectDialog({ open, initial, files, onClose, onSave, onDelete,
         }}
       >
         <h2 className="text-lg font-medium">{initial ? "Course settings" : "New course"}</h2>
-        <p className="mt-1 text-sm text-ink-muted">Keep a course together: its files and instructions work in every chat inside it, in all four apps.</p>
+        <p className="mt-1 text-sm text-ink-muted">Keep a course together: its files and instructions work in every chat inside it, in this app only.</p>
         <label htmlFor="project-name" className="mt-5 block text-sm font-medium">Name</label>
         <input id="project-name" value={name} onChange={(e) => setName(e.target.value)} maxLength={80} required placeholder="e.g. STATS 2244"
           className="mt-1.5 w-full rounded-xl border border-line-strong bg-surface-000 px-3.5 py-2.5 outline-none focus:border-brand" />

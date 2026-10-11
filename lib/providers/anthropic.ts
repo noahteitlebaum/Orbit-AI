@@ -1,11 +1,36 @@
 import { readSse } from "./sse";
-import { errorForStatus, normalizeTurns, ProviderError, type ProviderAdapter } from "./types";
+import { errorForStatus, normalizeTurns, parseArgs, ProviderError, type ChatTurn, type ProviderAdapter } from "./types";
 
-// Anthropic Messages API (streaming). Claude has no image generation.
+// Anthropic Messages API (streaming, tool use). Claude has no image generation.
+
+function toMessage(t: ChatTurn) {
+  if (t.toolResults?.length) {
+    return { role: "user", content: t.toolResults.map((r) => ({ type: "tool_result", tool_use_id: r.id, content: r.output || "(empty)" })) };
+  }
+  if (t.toolCalls?.length) {
+    return {
+      role: "assistant",
+      content: [
+        ...(t.content.trim() ? [{ type: "text", text: t.content }] : []),
+        ...t.toolCalls.map((c) => ({ type: "tool_use", id: c.id, name: c.name, input: c.args })),
+      ],
+    };
+  }
+  if (t.images?.length && t.role === "user") {
+    return {
+      role: "user",
+      content: [
+        ...t.images.map((i) => ({ type: "image", source: { type: "base64", media_type: i.mime, data: i.data } })),
+        { type: "text", text: t.content || " " },
+      ],
+    };
+  }
+  return { role: t.role, content: t.content };
+}
 export const anthropic: ProviderAdapter = {
   id: "anthropic",
 
-  async *stream({ model, system, history, maxOutput, apiKey, signal }) {
+  async *stream({ model, system, history, maxOutput, apiKey, signal, tools }) {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -17,17 +42,8 @@ export const anthropic: ProviderAdapter = {
         model: model.apiModel,
         max_tokens: maxOutput,
         system,
-        messages: normalizeTurns(history).map((t) =>
-          t.images?.length && t.role === "user"
-            ? {
-                role: "user",
-                content: [
-                  ...t.images.map((i) => ({ type: "image", source: { type: "base64", media_type: i.mime, data: i.data } })),
-                  { type: "text", text: t.content || " " },
-                ],
-              }
-            : { role: t.role, content: t.content },
-        ),
+        messages: normalizeTurns(history).map(toMessage),
+        ...(tools?.length ? { tools: tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters })) } : {}),
         stream: true,
       }),
       signal,
@@ -37,6 +53,7 @@ export const anthropic: ProviderAdapter = {
     let input = 0;
     let cached = 0;
     let output = 0;
+    const blocks = new Map<number, { id: string; name: string; json: string }>(); // tool_use blocks being streamed
     for await (const { data } of readSse(res.body)) {
       const ev = JSON.parse(data);
       switch (ev.type) {
@@ -47,9 +64,24 @@ export const anthropic: ProviderAdapter = {
           output = u.output_tokens ?? 0;
           break;
         }
+        case "content_block_start":
+          if (ev.content_block?.type === "tool_use") blocks.set(ev.index, { id: ev.content_block.id, name: ev.content_block.name, json: "" });
+          break;
         case "content_block_delta":
           if (ev.delta?.type === "text_delta" && ev.delta.text) yield { delta: ev.delta.text as string };
+          else if (ev.delta?.type === "input_json_delta") {
+            const b = blocks.get(ev.index);
+            if (b) b.json += ev.delta.partial_json ?? "";
+          }
           break;
+        case "content_block_stop": {
+          const b = blocks.get(ev.index);
+          if (b) {
+            blocks.delete(ev.index);
+            yield { toolCall: { id: b.id, name: b.name, args: parseArgs(b.json) } };
+          }
+          break;
+        }
         case "message_delta":
           if (ev.usage?.output_tokens != null) output = ev.usage.output_tokens;
           break;

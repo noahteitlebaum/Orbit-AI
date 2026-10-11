@@ -1,8 +1,13 @@
 import type { ImageModel, ModelOption, ProviderId } from "@/config/models";
+import type { ToolDef } from "@/lib/folder/tools";
 
 // Provider-neutral shapes (see docs/ARCHITECTURE.md). Server-only.
 export type TurnImage = { mime: string; data: string }; // base64
-export type ChatTurn = { role: "user" | "assistant"; content: string; images?: TurnImage[] };
+/** A function call the model made. `meta` carries provider data that must be sent back (Gemini thought signatures). */
+export type ToolCall = { id: string; name: string; args: Record<string, unknown>; meta?: { thoughtSignature?: string; providerId?: boolean } };
+export type ToolResult = { id: string; name: string; output: string };
+// Assistant turns may carry toolCalls; the user turn after them carries the matching toolResults.
+export type ChatTurn = { role: "user" | "assistant"; content: string; images?: TurnImage[]; toolCalls?: ToolCall[]; toolResults?: ToolResult[] };
 
 export interface Usage {
   input: number;     // prompt tokens
@@ -11,7 +16,7 @@ export interface Usage {
   cached: number;    // prompt tokens served from cache (reporting only; billed at full price to stay safe)
 }
 
-export type StreamEvent = { delta?: string; usage?: Usage };
+export type StreamEvent = { delta?: string; usage?: Usage; toolCall?: ToolCall };
 
 export type ProviderErrorCode = "timeout" | "rate_limit" | "auth" | "unavailable" | "bad_request" | "model_unavailable" | "not_configured" | "unknown";
 
@@ -28,6 +33,7 @@ export interface StreamArgs {
   maxOutput: number;
   apiKey: string;
   signal: AbortSignal;
+  tools?: ToolDef[]; // folder tools, when the student connected a folder
 }
 
 export interface ImageArgs {
@@ -62,10 +68,12 @@ export function errorForStatus(status: number): ProviderError {
 export function normalizeTurns(history: ChatTurn[]): ChatTurn[] {
   const out: ChatTurn[] = [];
   for (const t of history) {
-    if (!t.content.trim() && !t.images?.length) continue;
+    if (!t.content.trim() && !t.images?.length && !t.toolCalls?.length && !t.toolResults?.length) continue;
     if (out.length === 0 && t.role === "assistant") continue;
     const last = out[out.length - 1];
-    if (last && last.role === t.role) {
+    // Never merge across tool calls/results: each provider pairs them by position.
+    const tooly = Boolean(t.toolCalls?.length || t.toolResults?.length || last?.toolCalls?.length || last?.toolResults?.length);
+    if (last && last.role === t.role && !tooly) {
       last.content = [last.content, t.content].filter(Boolean).join("\n\n");
       if (t.images?.length) last.images = [...(last.images ?? []), ...t.images];
     } else out.push({ ...t, images: t.images ? [...t.images] : undefined });
@@ -76,3 +84,18 @@ export function normalizeTurns(history: ChatTurn[]): ChatTurn[] {
 export function decodeBase64(b64: string): Uint8Array {
   return new Uint8Array(Buffer.from(b64, "base64"));
 }
+
+/** Tool arguments arrive as JSON text from most providers; bad JSON becomes {} (the tool then reports what's missing). */
+export function parseArgs(raw: unknown): Record<string, unknown> {
+  if (raw && typeof raw === "object" && !Array.isArray(raw)) return raw as Record<string, unknown>;
+  if (typeof raw !== "string" || !raw.trim()) return {};
+  try {
+    const v = JSON.parse(raw);
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  } catch {
+    return {};
+  }
+}
+
+/** JSON schema for a tool without our extra fields. */
+export const toolSchema = (t: ToolDef) => ({ name: t.name, description: t.description, parameters: t.parameters });

@@ -4,7 +4,8 @@ import { google } from "./google";
 import { apiKeyFor, isLive, liveFor, liveProviders } from "./index";
 import { openai } from "./openai";
 import { readSse } from "./sse";
-import { normalizeTurns, type StreamArgs, type StreamEvent, type Usage } from "./types";
+import { normalizeTurns, type StreamArgs, type StreamEvent, type ToolCall, type Usage } from "./types";
+import { FOLDER_TOOLS } from "../folder/tools";
 import { xai } from "./xai";
 import type { ModelOption } from "../../config/models";
 
@@ -129,5 +130,84 @@ describe("live switch and keys", () => {
   it("reads keys from env only", () => {
     expect(apiKeyFor("google", { GEMINI_API_KEY: " g " })).toBe("g");
     expect(apiKeyFor("xai", {})).toBeNull();
+  });
+});
+
+describe("folder tools", () => {
+  const tools = FOLDER_TOOLS.filter((t) => t.name === "read_file");
+  // A run in progress: the model asked to read a file and got the result back.
+  const toolHistory = (): StreamArgs["history"] => [
+    { role: "user", content: "fix my notes" },
+    { role: "assistant", content: "Let me look.", toolCalls: [{ id: "c1", name: "read_file", args: { path: "a.md" }, meta: { thoughtSignature: "sig", providerId: true } }] },
+    { role: "user", content: "", toolResults: [{ id: "c1", name: "read_file", output: "a.md: hello" }] },
+  ];
+  const run = async (adapter: typeof openai, events: string[]) => {
+    const fetchMock = vi.fn(async () => sseResponse(events));
+    vi.stubGlobal("fetch", fetchMock);
+    const calls: ToolCall[] = [];
+    for await (const ev of adapter.stream({ ...args(), history: toolHistory(), tools })) if (ev.toolCall) calls.push(ev.toolCall);
+    const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    return { calls, body };
+  };
+
+  it("OpenAI: sends function tools + call/output items, parses calls", async () => {
+    const { calls, body } = await run(openai, [
+      `data: ${JSON.stringify({ type: "response.output_item.done", item: { type: "function_call", call_id: "c2", name: "read_file", arguments: '{"path":"b.md"}' } })}`,
+      `data: ${JSON.stringify({ type: "response.completed", response: { usage: { input_tokens: 1, output_tokens: 1 } } })}`,
+    ]);
+    expect(calls).toEqual([{ id: "c2", name: "read_file", args: { path: "b.md" } }]);
+    expect(body.tools[0]).toMatchObject({ type: "function", name: "read_file" });
+    expect(body.input).toEqual([
+      { role: "user", content: "fix my notes" },
+      { role: "assistant", content: "Let me look." },
+      { type: "function_call", call_id: "c1", name: "read_file", arguments: '{"path":"a.md"}' },
+      { type: "function_call_output", call_id: "c1", output: "a.md: hello" },
+    ]);
+  });
+
+  it("Anthropic: tool_use / tool_result blocks, streamed JSON input", async () => {
+    const { calls, body } = await run(anthropic, [
+      `data: ${JSON.stringify({ type: "message_start", message: { usage: { input_tokens: 1 } } })}`,
+      `data: ${JSON.stringify({ type: "content_block_start", index: 1, content_block: { type: "tool_use", id: "t2", name: "read_file" } })}`,
+      `data: ${JSON.stringify({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '{"pa' } })}`,
+      `data: ${JSON.stringify({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: 'th":"b.md"}' } })}`,
+      `data: ${JSON.stringify({ type: "content_block_stop", index: 1 })}`,
+      `data: ${JSON.stringify({ type: "message_stop" })}`,
+    ]);
+    expect(calls).toEqual([{ id: "t2", name: "read_file", args: { path: "b.md" } }]);
+    expect(body.tools[0]).toMatchObject({ name: "read_file", input_schema: { type: "object" } });
+    expect(body.messages[1].content).toEqual([{ type: "text", text: "Let me look." }, { type: "tool_use", id: "c1", name: "read_file", input: { path: "a.md" } }]);
+    expect(body.messages[2]).toEqual({ role: "user", content: [{ type: "tool_result", tool_use_id: "c1", content: "a.md: hello" }] });
+  });
+
+  it("Gemini: functionDeclarations, returns thought signatures", async () => {
+    const { calls, body } = await run(google, [
+      `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ functionCall: { name: "read_file", args: { path: "b.md" } }, thoughtSignature: "s2" }] } }] })}`,
+    ]);
+    expect(calls[0]).toMatchObject({ name: "read_file", args: { path: "b.md" }, meta: { thoughtSignature: "s2", providerId: false } });
+    expect(body.tools[0].functionDeclarations[0].name).toBe("read_file");
+    expect(body.contents[1]).toEqual({
+      role: "model",
+      parts: [{ text: "Let me look." }, { functionCall: { name: "read_file", args: { path: "a.md" }, id: "c1" }, thoughtSignature: "sig" }],
+    });
+    expect(body.contents[2]).toEqual({ role: "user", parts: [{ functionResponse: { name: "read_file", response: { output: "a.md: hello" } } }] });
+  });
+
+  it("xAI: assembles streamed tool_calls, sends tool messages", async () => {
+    const chunk = (tc: object) => `data: ${JSON.stringify({ choices: [{ delta: { tool_calls: [tc] } }] })}`;
+    const { calls, body } = await run(xai, [
+      chunk({ index: 0, id: "x1", function: { name: "read_file", arguments: '{"path":' } }),
+      chunk({ index: 0, function: { arguments: '"b.md"}' } }),
+      "data: [DONE]",
+    ]);
+    expect(calls).toEqual([{ id: "x1", name: "read_file", args: { path: "b.md" } }]);
+    expect(body.tools[0]).toMatchObject({ type: "function", function: { name: "read_file" } });
+    expect(body.messages[2]).toMatchObject({ role: "assistant", content: "Let me look.", tool_calls: [{ id: "c1", function: { name: "read_file", arguments: '{"path":"a.md"}' } }] });
+    expect(body.messages[3]).toEqual({ role: "tool", tool_call_id: "c1", content: "a.md: hello" });
+  });
+
+  it("never merges tool turns into neighbours", () => {
+    const out = normalizeTurns(toolHistory());
+    expect(out).toHaveLength(3);
   });
 });

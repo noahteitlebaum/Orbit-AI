@@ -1,28 +1,36 @@
 import { readSse } from "./sse";
-import { decodeBase64, errorForStatus, normalizeTurns, ProviderError, type ProviderAdapter } from "./types";
+import { decodeBase64, errorForStatus, normalizeTurns, parseArgs, ProviderError, toolSchema, type ChatTurn, type ProviderAdapter } from "./types";
 
-// OpenAI Responses API (streaming) + Images API.
+// OpenAI Responses API (streaming, function calling) + Images API.
+
+// One turn → Responses input items. Tool calls and results are their own items, paired by call_id.
+function toInput(t: ChatTurn): object[] {
+  if (t.toolResults?.length) return t.toolResults.map((r) => ({ type: "function_call_output", call_id: r.id, output: r.output }));
+  const items: object[] = [];
+  if (t.images?.length && t.role === "user") {
+    items.push({
+      role: "user",
+      content: [
+        ...t.images.map((i) => ({ type: "input_image", image_url: `data:${i.mime};base64,${i.data}` })),
+        { type: "input_text", text: t.content || " " },
+      ],
+    });
+  } else if (t.content || !t.toolCalls?.length) items.push({ role: t.role, content: t.content });
+  for (const c of t.toolCalls ?? []) items.push({ type: "function_call", call_id: c.id, name: c.name, arguments: JSON.stringify(c.args) });
+  return items;
+}
 export const openai: ProviderAdapter = {
   id: "openai",
 
-  async *stream({ model, system, history, maxOutput, apiKey, signal }) {
+  async *stream({ model, system, history, maxOutput, apiKey, signal, tools }) {
     const res = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         model: model.apiModel,
         instructions: system,
-        input: normalizeTurns(history).map((t) =>
-          t.images?.length && t.role === "user"
-            ? {
-                role: "user",
-                content: [
-                  ...t.images.map((i) => ({ type: "input_image", image_url: `data:${i.mime};base64,${i.data}` })),
-                  { type: "input_text", text: t.content || " " },
-                ],
-              }
-            : { role: t.role, content: t.content },
-        ),
+        input: normalizeTurns(history).flatMap(toInput),
+        ...(tools?.length ? { tools: tools.map((t) => ({ type: "function", ...toolSchema(t), strict: false })) } : {}),
         max_output_tokens: maxOutput,
         stream: true,
         store: false,
@@ -35,6 +43,9 @@ export const openai: ProviderAdapter = {
       if (data === "[DONE]") break;
       const ev = JSON.parse(data);
       if (ev.type === "response.output_text.delta" && ev.delta) yield { delta: ev.delta as string };
+      else if (ev.type === "response.output_item.done" && ev.item?.type === "function_call") {
+        yield { toolCall: { id: String(ev.item.call_id), name: String(ev.item.name), args: parseArgs(ev.item.arguments) } };
+      }
       else if (ev.type === "response.completed" || ev.type === "response.incomplete") {
         const u = ev.response?.usage;
         if (u) {

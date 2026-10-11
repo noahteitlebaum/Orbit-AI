@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
-import { IMAGE_MODELS, PROVIDERS, defaultModelFor, getModel, modelsFor, type ProviderId } from "@/config/models";
+import { FOLDER_ACCESS, IMAGE_MODELS, PROVIDERS, defaultModelFor, getModel, modelsFor, type ProviderId } from "@/config/models";
 import { THEMES } from "@/config/themes";
 import { signOut } from "../login/actions";
 import { ProviderLogo } from "@/components/provider-logo";
@@ -13,6 +13,12 @@ import { ProjectDialog } from "@/components/project-dialog";
 import { FileChip } from "@/components/file-chip";
 import { AnswerText, SourceList, type Source } from "@/components/answer-text";
 import { ACCEPT_ATTR, uploadFile, type UploadedFile } from "@/lib/files/upload-client";
+import { FolderDialog } from "@/components/folder-dialog";
+import { FolderActivity, previewFor, type Activity } from "@/components/folder-activity";
+import { loadApprovalMode, loadFolder, permission, runFolderTool, saveApprovalMode, saveFolder, type ApprovalMode, type FolderLink } from "@/lib/folder/browser-fs";
+import { describeCall, isFolderTool, isWriteTool } from "@/lib/folder/tools";
+import type { Step, StepResult, ToolLogEntry } from "@/lib/folder/run";
+import type { ToolCall } from "@/lib/providers/types";
 
 // Chats, projects and usage live in Supabase (see app/api/*). Each AI app has its own chats and projects.
 type Message = {
@@ -26,6 +32,8 @@ type Message = {
   error?: string; // friendly error text for a failed reply
   attachments?: { id: string; name: string; kind: string; status: string; error?: string | null }[];
   sources?: Source[];
+  activity?: Activity[]; // file actions in the connected folder
+  toolLog?: ToolLogEntry[]; // saved file actions, as loaded from the server
 };
 type Pending = { key: string; file?: UploadedFile; name: string; uploading: boolean; error?: string };
 type ChatSettings = { mode: StudyMode; courseOnly: boolean; summarized?: boolean };
@@ -52,7 +60,7 @@ function errorText(code: string, label: string, appName: string): string {
     case "auth": return `${appName} rejected the API key. It may have expired or been revoked.`;
     case "rate_limit": return `${appName} is rate-limiting us or the API account is out of credit. Try again shortly.`;
     case "reserve_failed": return "Couldn't check your budget. Make sure the database migrations have been run.";
-    case "db_setup": return "The database isn't fully set up yet. Run supabase/migrations/0001_core.sql and 0002_files_courses.sql in the Supabase SQL Editor.";
+    case "db_setup": return "The database isn't fully set up yet. Run every file in supabase/migrations in order in the Supabase SQL Editor.";
     case "bad_request": return `${label} couldn't handle that request.`;
     default: return `${label} didn't respond. Your chat is saved.`;
   }
@@ -82,6 +90,11 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
   const [settings, setSettings] = useState<Record<string, ChatSettings>>({});
   const [courseFiles, setCourseFiles] = useState<Record<string, UploadedFile[]>>({});
   const [courseUploading, setCourseUploading] = useState<string[]>([]);
+  const [folder, setFolder] = useState<FolderLink | null>(null); // folder the student connected (browser folder access)
+  const [folderOnline, setFolderOnline] = useState(false); // false = the browser wants permission again
+  const [folderDialog, setFolderDialog] = useState(false);
+  const [approvalMode, setApprovalMode] = useState<ApprovalMode>("ask"); // read from storage after mount
+  const approvals = useRef(new Map<string, (approve: boolean) => void>()); // file changes waiting for Apply / Skip
   const fileInput = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -127,6 +140,13 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     setProvider(saved);
     setReady(true);
     loadUsage();
+    setApprovalMode(loadApprovalMode());
+    // The connected folder is remembered; the browser may want the student to allow it again (asked on next send).
+    loadFolder().then(async (link) => {
+      if (!link) return;
+      setFolder(link);
+      setFolderOnline((await permission(link.handle, false)) === "granted");
+    });
   }, [loadUsage]);
 
   useEffect(() => {
@@ -165,7 +185,10 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       const res = await fetch(`/api/conversations/${id}`).catch(() => null);
       if (!res || handleAuth(res) || !res.ok) return;
       const out = (await res.json()) as { messages: Message[]; mode?: StudyMode; courseOnly?: boolean; summarized?: boolean };
-      setMessages((prev) => (prev[id] ? prev : { ...prev, [id]: out.messages }));
+      const withActivity = out.messages.map((m) =>
+        m.toolLog?.length ? { ...m, activity: m.toolLog.map((t, i) => ({ id: `${m.id}-${i}`, name: t.name, label: t.label, status: t.status })) } : m,
+      );
+      setMessages((prev) => (prev[id] ? prev : { ...prev, [id]: withActivity }));
       setSettings((prev) => (prev[id] ? prev : { ...prev, [id]: { mode: out.mode ?? "chat", courseOnly: Boolean(out.courseOnly), summarized: out.summarized } }));
     })();
   }, [active, messages, handleAuth]);
@@ -263,7 +286,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     const res = await fetch(editing ? `/api/projects/${editing.id}` : "/api/projects", {
       method: editing ? "PATCH" : "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(v),
+      body: JSON.stringify(editing ? v : { ...v, provider }),
     });
     if (!res.ok) {
       const e = (await res.json().catch(() => ({}))) as { message?: string };
@@ -271,10 +294,11 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       return;
     }
     const { project } = (await res.json()) as { project: Project };
-    // Courses are shared by all four apps.
-    setProjects((prev) =>
-      Object.fromEntries(PROVIDERS.map((pv) => [pv, editing ? prev[pv].map((p) => (p.id === project.id ? project : p)) : [project, ...prev[pv]]])) as Record<ProviderId, Project[]>,
-    );
+    // Each app has its own courses.
+    setProjects((prev) => ({
+      ...prev,
+      [provider]: editing ? (prev[provider] ?? []).map((p) => (p.id === project.id ? project : p)) : [project, ...(prev[provider] ?? [])],
+    }));
     if (!editing) {
       setProjectFilter((prev) => ({ ...prev, [provider]: project.id }));
       newChat();
@@ -363,64 +387,176 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     const replyTmp = tmpId();
     patchMessages(key, (m) => [...m, { id: replyTmp, role: "assistant", kind: "text", content: "", modelId, status: "streaming" }]);
     let currentKey = key;
+    let convId = active?.id;
     const patchReply = (fn: (m: Message) => Message) => patchMessages(currentKey, (list) => list.map((x) => (x.id === replyTmp ? fn(x) : x)));
 
     setBusy(true);
     const controller = new AbortController();
     abortRef.current = controller;
-    try {
-      const res = await fetch("/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          provider, modelId, content, retry, attachmentIds, conversationId: active?.id, projectId: active ? undefined : filter,
-          mode: chatSettings.mode, courseOnly: chatSettings.courseOnly,
-        }),
-        signal: controller.signal,
-      });
-      if (handleAuth(res)) return;
-      if (!res.ok || !res.body) {
-        const err = (await res.json().catch(() => ({}))) as { error?: string; conversationId?: string };
-        if (err.conversationId && !active) {
-          adoptConversation(err.conversationId, content.slice(0, 60), key);
-          currentKey = err.conversationId;
-        }
-        patchReply((m) => ({ ...m, status: "error", error: errorText(err.error ?? "unknown", label, theme.appName) }));
-        return;
+
+    // Folder tools only with the browser's permission. If it lapsed, this click lets the browser ask again.
+    let link = FOLDER_ACCESS[provider] ? folder : null;
+    if (link) {
+      const ok = (await permission(link.handle, true).catch(() => "denied")) === "granted";
+      setFolderOnline(ok);
+      if (!ok) {
+        link = null;
+        alertLine("Folder access wasn't allowed, so this reply can't use your files. Allow it from the + menu.");
       }
-      const reader = res.body.getReader();
-      const decoder = new TextDecoder();
-      let buf = "";
+    }
+
+    const common = { provider, modelId, mode: chatSettings.mode, courseOnly: chatSettings.courseOnly, folder: link ? { name: link.name } : undefined };
+    let body: object = { ...common, content, retry, attachmentIds, conversationId: convId, projectId: active ? undefined : filter };
+    const steps: Step[] = [];
+    try {
+      // One request per model round. When the model asks for file actions, run them here (after Apply for changes),
+      // then send the results back to continue the same reply.
       for (;;) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buf += decoder.decode(value, { stream: true });
-        let nl: number;
-        while ((nl = buf.indexOf("\n")) >= 0) {
-          const line = buf.slice(0, nl);
-          buf = buf.slice(nl + 1);
-          if (!line.trim()) continue;
-          const ev = JSON.parse(line);
-          if (ev.t === "meta") {
-            if (!active) {
-              adoptConversation(ev.conversationId, ev.title, key);
-              currentKey = ev.conversationId;
-            }
-            setDropped((prev) => ({ ...prev, [ev.conversationId]: ev.dropped }));
-            if (ev.summarized) setSettings((prev) => ({ ...prev, [ev.conversationId]: { ...(prev[ev.conversationId] ?? chatSettings), summarized: true } }));
-          } else if (ev.t === "delta") patchReply((m) => ({ ...m, content: m.content + ev.v }));
-          else if (ev.t === "done") patchReply((m) => ({ ...m, status: ev.status === "partial" ? "partial" : "complete", sources: ev.sources }));
-          else if (ev.t === "error") patchReply((m) => ({ ...m, status: "error", error: errorText(ev.code, label, theme.appName) }));
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+          signal: controller.signal,
+        });
+        if (handleAuth(res)) return;
+        if (!res.ok || !res.body) {
+          const err = (await res.json().catch(() => ({}))) as { error?: string; conversationId?: string };
+          if (err.conversationId && !convId) {
+            adoptConversation(err.conversationId, content.slice(0, 60), key);
+            currentKey = convId = err.conversationId;
+          }
+          patchReply((m) => ({ ...m, status: "error", error: errorText(err.error ?? "unknown", label, theme.appName) }));
+          return;
         }
+        let toolTurn: { replyId: string; text: string; calls: ToolCall[] } | null = null;
+        const reader = res.body.getReader();
+        const decoder = new TextDecoder();
+        let buf = "";
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          buf += decoder.decode(value, { stream: true });
+          let nl: number;
+          while ((nl = buf.indexOf("\n")) >= 0) {
+            const line = buf.slice(0, nl);
+            buf = buf.slice(nl + 1);
+            if (!line.trim()) continue;
+            const ev = JSON.parse(line);
+            if (ev.t === "meta") {
+              if (!convId) {
+                adoptConversation(ev.conversationId, ev.title, key);
+                currentKey = convId = ev.conversationId;
+              }
+              setDropped((prev) => ({ ...prev, [ev.conversationId]: ev.dropped }));
+              if (ev.summarized) setSettings((prev) => ({ ...prev, [ev.conversationId]: { ...(prev[ev.conversationId] ?? chatSettings), summarized: true } }));
+            } else if (ev.t === "delta") patchReply((m) => ({ ...m, content: m.content + ev.v }));
+            else if (ev.t === "done") patchReply((m) => ({ ...m, status: ev.status === "partial" ? "partial" : "complete", sources: ev.sources }));
+            else if (ev.t === "tool_calls") toolTurn = { replyId: ev.replyId, text: ev.text ?? "", calls: ev.calls ?? [] };
+            else if (ev.t === "error") patchReply((m) => ({ ...m, status: "error", error: errorText(ev.code, label, theme.appName) }));
+          }
+        }
+        if (!toolTurn) break;
+        if (!link) {
+          patchReply((m) => ({ ...m, status: "partial" }));
+          break;
+        }
+        const results = await runToolCalls(link, toolTurn.calls, patchReply, controller.signal);
+        if (controller.signal.aborted) {
+          patchReply((m) => ({ ...m, status: "partial" }));
+          break;
+        }
+        steps.push({ text: toolTurn.text, calls: toolTurn.calls, results });
+        body = { ...common, conversationId: convId, run: { replyId: toolTurn.replyId, steps } };
       }
     } catch (e) {
       const stopped = (e as Error).name === "AbortError";
       patchReply((m) => ({ ...m, status: stopped ? "partial" : "error", error: stopped ? undefined : errorText("unknown", label, theme.appName) }));
     } finally {
+      for (const decide of approvals.current.values()) decide(false);
+      approvals.current.clear();
       setBusy(false);
       abortRef.current = null;
       loadUsage();
     }
+  }
+
+  // Run the model's file actions on the connected folder. Reads run straight away; changes are checked
+  // first (dry run), then wait for the student's Apply / Skip.
+  async function runToolCalls(link: FolderLink, calls: ToolCall[], patchReply: (fn: (m: Message) => Message) => void, signal: AbortSignal): Promise<StepResult[]> {
+    const results: StepResult[] = [];
+    for (const c of calls) {
+      const actId = `${c.id}:${tmpId()}`;
+      const setAct = (patch: Partial<Activity>) =>
+        patchReply((m) => {
+          const list = m.activity ?? [];
+          const base: Activity = { id: actId, name: c.name, label: describeCall(c.name, c.args), status: "running" };
+          return { ...m, activity: list.some((a) => a.id === actId) ? list.map((a) => (a.id === actId ? { ...a, ...patch } : a)) : [...list, { ...base, ...patch }] };
+        });
+      const fail = (error: string) => {
+        setAct({ status: "error", detail: error, preview: undefined });
+        results.push({ id: c.id, name: c.name, output: `Error: ${error}`, status: "error" });
+        if (/didn't allow access/.test(error)) setFolderOnline(false);
+      };
+      if (signal.aborted) {
+        results.push({ id: c.id, name: c.name, output: "Stopped by the student.", status: "declined" });
+        continue;
+      }
+      if (!isFolderTool(c.name)) {
+        fail(`Unknown tool ${c.name}.`);
+        continue;
+      }
+      setAct({ status: "running" });
+      if (isWriteTool(c.name)) {
+        const check = await runFolderTool(link, c.name, c.args, true);
+        if (!check.ok) {
+          fail(check.error);
+          continue;
+        }
+        // "Don't ask for edits" skips the prompt, except for deletes, which always ask.
+        const autoApprove = approvalMode === "edits" && c.name !== "delete_path";
+        if (!autoApprove) setAct({ status: "waiting", detail: check.output, preview: previewFor(c.name, c.args) });
+        const approved = autoApprove || await new Promise<boolean>((resolve) => {
+          approvals.current.set(actId, resolve);
+          if (signal.aborted) resolve(false);
+          signal.addEventListener("abort", () => resolve(false), { once: true });
+        });
+        approvals.current.delete(actId);
+        if (!approved) {
+          setAct({ status: "declined", preview: undefined, detail: undefined });
+          results.push({ id: c.id, name: c.name, output: "The student declined this change. Don't try it again; ask what they'd like instead.", status: "declined" });
+          continue;
+        }
+        setAct({ status: "running", preview: undefined, detail: undefined });
+      }
+      const out = await runFolderTool(link, c.name, c.args);
+      if (out.ok) {
+        setAct({ status: "ok" });
+        results.push({ id: c.id, name: c.name, output: out.output, status: "ok" });
+      } else fail(out.error);
+    }
+    return results;
+  }
+
+  function linkFolder(next: FolderLink) {
+    saveFolder(next);
+    setFolder(next);
+    setFolderOnline(true);
+    setFolderDialog(false);
+    alertLine(`Connected to ${next.name}.`);
+  }
+
+  async function reconnectFolder() {
+    if (!folder) return;
+    const ok = (await permission(folder.handle, true).catch(() => "denied")) === "granted";
+    setFolderOnline(ok);
+    if (ok) setFolderDialog(false);
+  }
+
+  function unlinkFolder() {
+    saveFolder(null);
+    setFolder(null);
+    setFolderOnline(false);
+    setFolderDialog(false);
   }
 
   async function sendImage(prompt: string, key: string) {
@@ -509,6 +645,8 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       imageLabel={imageModel?.label ?? null} imageMode={imageMode} onImageMode={setImageMode}
       mode={chatSettings.mode} onMode={(m) => setChatSettings({ mode: m })}
       courseOnly={chatSettings.courseOnly} onCourseOnly={(v) => setChatSettings({ courseOnly: v })}
+      folderName={folder?.name ?? null} folderOffline={Boolean(folder) && !folderOnline}
+      onFolder={FOLDER_ACCESS[provider] ? () => setFolderDialog(true) : undefined}
       disabled={busy}
     />
   );
@@ -789,6 +927,9 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                             {m.status === "partial" && <span className="ml-1 text-xs text-ink-subtle">[stopped]</span>}
                           </div>
                         )}
+                        {m.activity && m.activity.length > 0 && (
+                          <FolderActivity items={m.activity} onDecide={(id, ok) => approvals.current.get(id)?.(ok)} />
+                        )}
                         {m.kind === "text" && m.sources && m.sources.length > 0 && (
                           <SourceList sources={m.sources} />
                         )}
@@ -814,6 +955,20 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
         </p>
       </main>
 
+      <FolderDialog
+        open={folderDialog}
+        link={folder}
+        needsPermission={Boolean(folder) && !folderOnline}
+        onClose={() => setFolderDialog(false)}
+        onLinked={linkFolder}
+        onReconnect={reconnectFolder}
+        onDisconnect={unlinkFolder}
+        approvalMode={approvalMode}
+        onApprovalMode={(m) => {
+          setApprovalMode(m);
+          saveApprovalMode(m);
+        }}
+      />
       <ProjectDialog
         open={projectDialog !== null}
         initial={projectDialog?.editing}

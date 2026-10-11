@@ -12,11 +12,11 @@ export async function GET(_: Request, ctx: RouteContext<"/api/conversations/[id]
 
   const { data: conv } = await auth.supabase.from("conversations").select("id, mode, course_only, summary").eq("id", id).maybeSingle();
   if (!conv) return json({ error: "not_found" }, 404);
-  const { data: rows, error } = await auth.supabase
-    .from("messages")
-    .select("id, role, kind, content, image_path, model_id, status, attachment_ids, sources")
-    .eq("conversation_id", id)
-    .order("seq");
+  const cols = "id, role, kind, content, image_path, model_id, status, attachment_ids, sources";
+  const load = (extra: string) => auth.supabase.from("messages").select(cols + extra).eq("conversation_id", id).order("seq");
+  // tool_log arrives with migration 0004; chats still load if it hasn't been run yet.
+  let { data: rows, error } = (await load(", tool_log")) as unknown as { data: Record<string, unknown>[] | null; error: { code?: string } | null };
+  if (error) ({ data: rows, error } = (await load("")) as unknown as { data: Record<string, unknown>[] | null; error: { code?: string } | null });
   if (error) return dbError(error, "load_failed");
 
   const paths = (rows ?? []).filter((m) => m.image_path).map((m) => m.image_path as string);
@@ -43,11 +43,12 @@ export async function GET(_: Request, ctx: RouteContext<"/api/conversations/[id]
       role: m.role,
       kind: m.kind,
       content: m.content,
-      imageUrl: m.image_path ? urls.get(m.image_path) ?? null : undefined,
+      imageUrl: m.image_path ? urls.get(m.image_path as string) ?? null : undefined,
       modelId: m.model_id ?? undefined,
       status: m.status,
       attachments: ((m.attachment_ids as string[] | null) ?? []).map((fid) => files.get(fid)).filter(Boolean),
       sources: m.sources ?? undefined,
+      toolLog: m.tool_log ?? undefined,
     })),
   });
 }

@@ -11,7 +11,7 @@ const state = vi.hoisted(() => ({
   events: [] as unknown[],
   failBeforeStart: false,
   reserveOk: true,
-  lastArgs: null as null | { system: string; history: { role: string; content: string; images?: unknown[] }[] },
+  lastArgs: null as null | { system: string; history: { role: string; content: string; images?: unknown[]; toolCalls?: unknown[]; toolResults?: unknown[] }[]; tools?: { name: string }[] },
 }));
 
 vi.mock("@/lib/api", async (orig) => ({
@@ -31,7 +31,7 @@ vi.mock("@/lib/providers", () => ({
   ADAPTERS: {
     anthropic: {
       id: "anthropic",
-      async *stream(args: { system: string; history: { role: string; content: string }[] }): AsyncGenerator<StreamEvent> {
+      async *stream(args: { system: string; history: { role: string; content: string }[]; tools?: { name: string }[] }): AsyncGenerator<StreamEvent> {
         state.lastArgs = args;
         if (state.failBeforeStart) throw new ProviderError("unavailable", 503);
         for (const e of state.events as StreamEvent[]) yield e;
@@ -201,5 +201,63 @@ describe("POST /api/chat", () => {
       expect(state.lastArgs!.system).toContain("QUIZ ME");
       expect(state.fake!.db.conversations[0].mode).toBe("quiz");
     });
+  });
+});
+
+describe("folder tools", () => {
+  const readCall = { id: "c1", name: "read_file", args: { path: "notes.md" } };
+
+  async function startRun() {
+    state.live = true;
+    state.events = [{ delta: "Let me check." }, { toolCall: readCall }, { usage: { input: 10, output: 5, reasoning: 0, cached: 0 } }];
+    const res = await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "fix my notes", folder: { name: "Essays" } }));
+    return readEvents(res);
+  }
+
+  it("offers tools only when a folder is connected", async () => {
+    state.live = true;
+    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "hi" })));
+    expect(state.lastArgs!.tools).toBeUndefined();
+    await startRun();
+    expect(state.lastArgs!.tools!.map((t) => t.name)).toContain("edit_file");
+    expect(state.lastArgs!.system).toContain('folder from their computer called "Essays"');
+  });
+
+  it("ends a round with tool_calls and keeps the reply open", async () => {
+    const events = await startRun();
+    const last = events.at(-1);
+    expect(last).toMatchObject({ t: "tool_calls", text: "Let me check.", calls: [readCall] });
+    const reply = state.fake!.db.messages.find((m) => m.id === last.replyId)!;
+    expect(reply).toMatchObject({ role: "assistant", status: "partial", content: "Let me check." });
+    expect(budget.settle).toHaveBeenCalledWith(expect.any(String), "settled", expect.any(Number), expect.anything(), undefined);
+  });
+
+  it("continues the same reply with the tool results, as a separate budgeted call", async () => {
+    const first = await startRun();
+    const { replyId } = first.at(-1);
+    const conversationId = first[0].conversationId;
+    state.events = [{ delta: "Fixed the typo." }, { usage: { input: 20, output: 5, reasoning: 0, cached: 0 } }];
+    const steps = [{ text: "Let me check.", calls: [readCall], results: [{ id: "c1", output: "notes.md: teh cat", status: "ok" }] }];
+    const res = await POST(req({ provider: "anthropic", modelId: "anthropic-default", conversationId, folder: { name: "Essays" }, run: { replyId, steps } }));
+    const events = await readEvents(res);
+    expect(events.at(-1)).toMatchObject({ t: "done", status: "complete" });
+    const h = state.lastArgs!.history;
+    expect(h.at(-2)).toMatchObject({ role: "assistant", content: "Let me check.", toolCalls: [readCall] });
+    expect(h.at(-1)).toMatchObject({ role: "user", toolResults: [{ id: "c1", output: "notes.md: teh cat" }] });
+    expect(h.filter((t) => t.role === "assistant" && t.content === "Let me check.")).toHaveLength(1); // not duplicated from the saved reply
+    const msgs = state.fake!.db.messages;
+    expect(msgs.map((m) => m.role)).toEqual(["user", "assistant"]); // no new rows
+    expect(msgs[1]).toMatchObject({ content: "Let me check.\n\nFixed the typo.", status: "complete", tool_log: [{ name: "read_file", label: "Read notes.md", status: "ok" }] });
+    expect(budget.reserve).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects a run for an old reply or with bad steps", async () => {
+    const first = await startRun();
+    const conversationId = first[0].conversationId;
+    const good = [{ text: "", calls: [readCall], results: [{ id: "c1", output: "x", status: "ok" }] }];
+    const bad = async (run: object) => (await POST(req({ provider: "anthropic", modelId: "anthropic-default", conversationId, run }))).status;
+    expect(await bad({ replyId: crypto.randomUUID(), steps: good })).toBe(400);
+    expect(await bad({ replyId: first.at(-1).replyId, steps: [{ ...good[0], calls: [{ ...readCall, name: "run_shell" }] }] })).toBe(400);
+    expect(await bad({ replyId: first.at(-1).replyId, steps: [{ ...good[0], results: [{ id: "other", output: "x" }] }] })).toBe(400);
   });
 });

@@ -88,6 +88,9 @@ export const IMAGE_MODELS: Record<ProviderId, ImageModel | null> = {
   xai: { provider: "xai", label: "Grok Imagine", apiModel: "grok-imagine-image-2.0", pricePerImage: 0.04 },
 };
 
+// Folder access (browser folder picker + file tools). All four APIs support function calling; switch one off here if needed.
+export const FOLDER_ACCESS: Record<ProviderId, boolean> = { openai: true, anthropic: true, google: true, xai: true };
+
 export const DEFAULT_MODEL_ID = MODELS[0].id;
 export const PROVIDERS: ProviderId[] = ["openai", "anthropic", "google", "xai"];
 

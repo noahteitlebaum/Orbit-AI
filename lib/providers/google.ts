@@ -1,22 +1,45 @@
 import { readSse } from "./sse";
-import { decodeBase64, errorForStatus, normalizeTurns, ProviderError, type ProviderAdapter } from "./types";
+import { decodeBase64, errorForStatus, normalizeTurns, parseArgs, ProviderError, toolSchema, type ChatTurn, type ProviderAdapter } from "./types";
 
 // Gemini API (streamGenerateContent over SSE) + native image generation.
 const BASE = "https://generativelanguage.googleapis.com/v1beta/models";
 
+function toContent(t: ChatTurn) {
+  if (t.toolResults?.length) {
+    return {
+      role: "user",
+      parts: t.toolResults.map((r) => ({ functionResponse: { name: r.name, response: { output: r.output } } })),
+    };
+  }
+  if (t.toolCalls?.length) {
+    return {
+      role: "model",
+      parts: [
+        ...(t.content.trim() ? [{ text: t.content }] : []),
+        ...t.toolCalls.map((c) => ({
+          functionCall: { name: c.name, args: c.args, ...(c.meta?.providerId ? { id: c.id } : {}) },
+          ...(c.meta?.thoughtSignature ? { thoughtSignature: c.meta.thoughtSignature } : {}),
+        })),
+      ],
+    };
+  }
+  return {
+    role: t.role === "assistant" ? "model" : "user",
+    parts: [...(t.images ?? []).map((i) => ({ inlineData: { mimeType: i.mime, data: i.data } })), { text: t.content || " " }],
+  };
+}
+
 export const google: ProviderAdapter = {
   id: "google",
 
-  async *stream({ model, system, history, maxOutput, apiKey, signal }) {
+  async *stream({ model, system, history, maxOutput, apiKey, signal, tools }) {
     const res = await fetch(`${BASE}/${encodeURIComponent(model.apiModel)}:streamGenerateContent?alt=sse`, {
       method: "POST",
       headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: system }] },
-        contents: normalizeTurns(history).map((t) => ({
-          role: t.role === "assistant" ? "model" : "user",
-          parts: [...(t.images ?? []).map((i) => ({ inlineData: { mimeType: i.mime, data: i.data } })), { text: t.content || " " }],
-        })),
+        contents: normalizeTurns(history).map(toContent),
+        ...(tools?.length ? { tools: [{ functionDeclarations: tools.map(toolSchema) }] } : {}),
         generationConfig: { maxOutputTokens: maxOutput },
       }),
       signal,
@@ -24,11 +47,22 @@ export const google: ProviderAdapter = {
     if (!res.ok || !res.body) throw errorForStatus(res.status);
 
     let usage: { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number; cachedContentTokenCount?: number } | undefined;
+    let n = 0;
     for await (const { data } of readSse(res.body)) {
       const ev = JSON.parse(data);
       if (ev.error) throw new ProviderError("unavailable", ev.error.code, true);
       for (const part of ev.candidates?.[0]?.content?.parts ?? []) {
-        if (part.text && !part.thought) yield { delta: part.text as string };
+        if (part.functionCall) {
+          // Gemini 3 requires the thought signature to be sent back with the call, or the next request fails.
+          const fc = part.functionCall;
+          n++;
+          yield {
+            toolCall: {
+              id: fc.id ? String(fc.id) : `call_${n}_${Date.now().toString(36)}`, name: String(fc.name), args: parseArgs(fc.args),
+              meta: { thoughtSignature: part.thoughtSignature, providerId: Boolean(fc.id) },
+            },
+          };
+        } else if (part.text && !part.thought) yield { delta: part.text as string };
       }
       if (ev.usageMetadata) usage = ev.usageMetadata; // cumulative; the last one wins
     }

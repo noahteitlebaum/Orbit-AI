@@ -25,7 +25,7 @@ const SETUP_CODES = new Set(["42P01", "42703", "23502", "PGRST204", "PGRST205", 
 export function dbError(error: { code?: string } | null | undefined, fallback: string, status = 500) {
   if (error?.code && SETUP_CODES.has(error.code)) {
     return Response.json(
-      { error: "db_setup", message: "The database isn't fully set up. Run supabase/migrations/0001_core.sql and 0002_files_courses.sql in the Supabase SQL Editor." },
+      { error: "db_setup", message: "The database isn't fully set up. Run every file in supabase/migrations (0001, 0002, …) in order in the Supabase SQL Editor." },
       { status: 503 },
     );
   }

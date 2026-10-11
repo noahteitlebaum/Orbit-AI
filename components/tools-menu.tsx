@@ -10,7 +10,7 @@ export const MODE_LABELS: Record<StudyMode, { label: string; hint: string }> = {
   hints: { label: "Hints only", hint: "Nudges, never the full answer" },
 };
 
-// "+" menu in the message box: upload files, create an image, pick a study mode, limit answers to course files.
+// "+" menu in the message box: upload files, connect a folder, create an image, pick a study mode, limit answers to course files.
 export function ToolsMenu(p: {
   onUpload: () => void;
   imageLabel: string | null; // null = this app can't make images
@@ -20,6 +20,9 @@ export function ToolsMenu(p: {
   onMode: (m: StudyMode) => void;
   courseOnly: boolean;
   onCourseOnly: (on: boolean) => void;
+  folderName?: string | null; // connected folder
+  folderOffline?: boolean;    // remembered folder, but the browser wants permission again
+  onFolder?: () => void;      // open the connect / folder dialog; omitted = this app has no folder access
   disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
@@ -49,6 +52,14 @@ export function ToolsMenu(p: {
         </svg>
       </button>
 
+      {p.folderName && p.onFolder && (
+        <button type="button" onClick={p.onFolder} title={p.folderOffline ? "Allow folder access again" : "Folder settings"}
+          className="flex max-w-[11rem] items-center gap-1.5 whitespace-nowrap rounded-full bg-surface-300 py-1 pl-2.5 pr-2.5 text-xs font-medium text-ink">
+          <FolderIcon />
+          <span className="truncate">{p.folderName}</span>
+          <span aria-hidden className={`h-1.5 w-1.5 shrink-0 rounded-full ${p.folderOffline ? "bg-warning" : "bg-success"}`} />
+        </button>
+      )}
       {p.imageMode && <Chip onClear={() => p.onImageMode(false)} label="Image" icon={<ImageIcon />} />}
       {p.mode !== "chat" && <Chip onClear={() => p.onMode("chat")} label={MODE_LABELS[p.mode].label} icon={<CapIcon />} />}
       {p.courseOnly && <Chip onClear={() => p.onCourseOnly(false)} label="My files only" icon={<BookIcon />} />}
@@ -62,6 +73,15 @@ export function ToolsMenu(p: {
               <span className="block truncate text-xs text-ink-subtle">PDF, Word, text or images</span>
             </span>
           </button>
+          {p.onFolder && (
+            <button type="button" role="menuitem" className={item} onClick={() => { p.onFolder!(); setOpen(false); }}>
+              <span className={icon}><FolderIcon /></span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-medium">{p.folderName ? `Folder: ${p.folderName}` : "Connect a folder"}</span>
+                <span className="block truncate text-xs text-ink-subtle">{p.folderName ? (p.folderOffline ? "Click to allow access again" : "Read and edit files, with your approval") : "Let the AI read and edit files on your computer"}</span>
+              </span>
+            </button>
+          )}
           <button type="button" role="menuitemcheckbox" aria-checked={p.imageMode} disabled={!p.imageLabel} className={item}
             onClick={() => { p.onImageMode(!p.imageMode); setOpen(false); }}>
             <span className={icon}><ImageIcon /></span>
@@ -141,6 +161,13 @@ function BookIcon() {
   return (
     <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden>
       <path d="M8 4c-1.5-1-3.5-1.3-5.5-1v9.5c2-.3 4 0 5.5 1 1.5-1 3.5-1.3 5.5-1V3c-2-.3-4 0-5.5 1zm0 0v9.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+    </svg>
+  );
+}
+function FolderIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden>
+      <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.6l1.5 1.5h4.9A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
     </svg>
   );
 }
