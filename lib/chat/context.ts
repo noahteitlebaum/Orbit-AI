@@ -90,7 +90,7 @@ export function systemPrompt(o: {
   if (o.material) {
     parts.push(
       "Course material: numbered passages from the student's files are below. When you use one, cite it right after the claim as [S1], [S2]… " +
-        "Only cite passages you actually used; never invent citations or page numbers.",
+        "Only cite passages you actually used; never invent citations, file names or page numbers, and don't write references in any other form (like \"Lecture 5, p. 20\") — only [S#].",
     );
     parts.push(
       o.courseOnly
@@ -100,6 +100,8 @@ export function systemPrompt(o: {
     parts.push(`<course_material>\n${o.material}\n</course_material>`);
   } else if (o.courseOnly && o.hasFiles) {
     parts.push("The student turned on \"Only use my course material\", but nothing in their files matched this question. Say \"I couldn't find this in your course files\" and suggest what to upload or how to rephrase. Don't answer from general knowledge.");
+  } else if (o.courseOnly) {
+    parts.push("The student turned on \"Only use my course material\", but this chat has no course files yet. Say so, and suggest attaching the lecture slides or readings (or adding them to the course). Don't answer from general knowledge.");
   }
   return parts.join("\n\n");
 }

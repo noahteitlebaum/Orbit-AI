@@ -113,3 +113,16 @@ describe("finding the right course passages", () => {
     expect((await run("and when is that?", "is there a midterm?")).sources.map((s) => s.label)).toEqual(["syllabus.pdf, p. 2"]);
   });
 });
+
+describe("references point only at passages actually sent", () => {
+  it("drops made-up [S#] markers, keeps real ones, and labels grounding", async () => {
+    const { stripInventedCitations, citedSources, grounding } = await import("./material");
+    const sent = [1, 2].map((n) => ({ n, fileId: "f", fileName: "lec.pdf", page: n, label: `lec.pdf, p. ${n}`, excerpt: "x" }));
+    const text = stripInventedCitations("Strata are subgroups [S1]. Also see [S7].", sent);
+    expect(text).toBe("Strata are subgroups [S1]. Also see.");
+    expect(citedSources(text, sent).map((s) => s.n)).toEqual([1]);
+    expect(grounding(sent, citedSources(text, sent))).toBe("cited");
+    expect(grounding(sent, [])).toBe("uncited");
+    expect(grounding([], [])).toBe("none");
+  });
+});

@@ -161,6 +161,22 @@ describe("POST /api/chat", () => {
       expect(state.fake!.db.messages[0].attachment_ids).toEqual([f.id]);
     });
 
+    it("made-up citations are removed from the saved answer; an answer that uses no passage is marked as such", async () => {
+      state.live = true;
+      const f = seedFile();
+      state.fake!.db.file_chunks.push({ id: "c1", file_id: f.id, page: 1, chunk_index: 0, content: "Stratified sampling divides the population." });
+      state.events = [{ delta: "Strata [S1], also [S9]." }, { usage: { input: 10, output: 10, reasoning: 0, cached: 0 } }];
+      const events = await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "Explain stratified", attachmentIds: [f.id] })));
+      expect(events.at(-1)).toMatchObject({ t: "done", grounding: "cited" });
+      const reply = state.fake!.db.messages.find((m) => m.role === "assistant")!;
+      expect(reply.content).toBe("Strata [S1], also.");
+      expect((reply.sources as { label: string }[]).map((x) => x.label)).toEqual(["lecture3.pdf, p. 1"]);
+
+      state.events = [{ delta: "General answer." }, { usage: { input: 10, output: 10, reasoning: 0, cached: 0 } }];
+      const again = await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "Explain stratified again", conversationId: events[0].conversationId })));
+      expect(again.at(-1)).toMatchObject({ grounding: "uncited", sources: [] });
+    });
+
     it("won't attach someone else's or an already-used file", async () => {
       const used = seedFile({ conversation_id: "other-chat" });
       await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "hi", attachmentIds: [used.id] })));

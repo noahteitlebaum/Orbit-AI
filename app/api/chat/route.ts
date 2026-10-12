@@ -3,7 +3,7 @@ import { FOLDER_ACCESS, PDF_INPUT, getModel, isProvider } from "@/config/models"
 import { dbError, isUuid, json, requireAppUser } from "@/lib/api";
 import { isProviderDisabled, overRateLimit, reserve, settle } from "@/lib/billing/budget";
 import { buildContext, costMicros, estimateTokens, maxOutputFor, reservationMicros, STUDY_MODES, systemPrompt, type StudyMode } from "@/lib/chat/context";
-import { citedSources, gatherMaterial, IMAGE_TOKENS, loadImages, MAX_IMAGES, type Source } from "@/lib/chat/material";
+import { citedSources, gatherMaterial, grounding, IMAGE_TOKENS, loadImages, MAX_IMAGES, stripInventedCitations, type Source } from "@/lib/chat/material";
 import { SUMMARY_TOKENS, updateSummary } from "@/lib/chat/summary";
 import { ADAPTERS, apiKeyFor, liveFor } from "@/lib/providers";
 import { ProviderError, type ChatTurn, type StreamEvent, type ToolCall, type Usage } from "@/lib/providers/types";
@@ -288,8 +288,11 @@ export async function POST(request: Request): Promise<Response> {
       const finalText = stopped ? shown : text;
       const wantsTools = !failure && !stopped && calls.length > 0;
       const status = failure ? "error" : stopped || wantsTools ? "partial" : "complete";
-      const sources = citedSources(finalText, material.sources);
-      await supabase.from("messages").update({ content: finalText, status, sources: sources.length ? sources : null }).eq("id", replyId);
+      // References only point at passages that were really sent: made-up [S#] markers are removed from the saved text.
+      const savedText = stripInventedCitations(finalText, material.sources);
+      const sources = citedSources(savedText, material.sources);
+      const ground = grounding(material.sources, sources);
+      await supabase.from("messages").update({ content: savedText, status, sources: ground === "none" ? null : sources }).eq("id", replyId);
       await supabase.from("conversations").update({ updated_at: new Date().toISOString() }).eq("id", conversation.id);
       // File activity shown under the reply (needs migration 0004; skipped quietly if it hasn't been run).
       if (run) await supabase.from("messages").update({ tool_log: toolLog(run.steps) }).eq("id", replyId);
@@ -302,7 +305,7 @@ export async function POST(request: Request): Promise<Response> {
 
       if (failure) send({ t: "error", code: failure.code });
       else if (wantsTools) send({ t: "tool_calls", replyId, text: text.slice(priorText.length).trim(), calls });
-      else send({ t: "done", status, sources });
+      else send({ t: "done", status, sources, grounding: ground });
       try {
         controller.close();
       } catch {}

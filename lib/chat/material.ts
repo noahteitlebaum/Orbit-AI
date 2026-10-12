@@ -20,6 +20,7 @@ export const MATERIAL_TOKEN_BUDGET = 12_000;
 const SMALL_FILE_CHARS = 24_000; // attachments this small are sent whole
 export const IMAGE_TOKENS = 1_600; // rough cost of one image in the prompt
 export const MAX_IMAGES = 4;
+export const EXCERPT_CHARS = 600;     // passage text kept with each reference, so students can check it
 export const MAX_VISUAL_PAGES = 8;   // PDF pages sent as images per question
 export const PAGE_TOKENS = 2_000;    // rough cost of one PDF page read visually (image + text)
 
@@ -135,7 +136,7 @@ export async function gatherMaterial(
   picked.sort((a, b) => (a.file_id === b.file_id ? a.chunk_index - b.chunk_index : 0));
   const sources: Source[] = picked.map((c, i) => {
     const f = byId.get(c.file_id)!;
-    return { n: i + 1, fileId: c.file_id, fileName: f.name, page: c.page, label: referenceLabel(f.name, c.page, c.chunk_index), excerpt: c.content.slice(0, 280) };
+    return { n: i + 1, fileId: c.file_id, fileName: f.name, page: c.page, label: referenceLabel(f.name, c.page, c.chunk_index), excerpt: c.content.slice(0, EXCERPT_CHARS) };
   });
   const blocks = picked.map((c, i) => `[S${i + 1}] ${sources[i].label}\n${c.content}`);
 
@@ -314,4 +315,20 @@ export async function loadImages(supabase: SupabaseClient, attachmentIdsByMessag
 export function citedSources(answer: string, sources: Source[]): Source[] {
   const cited = new Set([...answer.matchAll(/\[S(\d+)\]/g)].map((m) => Number(m[1])));
   return sources.filter((s) => cited.has(s.n));
+}
+
+/** Remove [S#] markers that don't match a passage we actually sent (made-up citations), so they're never shown. */
+export function stripInventedCitations(answer: string, sources: Source[]): string {
+  const real = new Set(sources.map((s) => s.n));
+  return answer.replace(/ ?\[S(\d+)\]/g, (m, n) => (real.has(Number(n)) ? m : ""));
+}
+
+/**
+ * How an answer relates to the student's files, shown under it:
+ * cited = uses passages (listed) · uncited = passages were sent but none used · none = nothing from the files was sent.
+ * Stored as sources = [...] / [] / null, so it survives reloads without a schema change.
+ */
+export type Grounding = "cited" | "uncited" | "none";
+export function grounding(sent: Source[], cited: Source[]): Grounding {
+  return cited.length ? "cited" : sent.length ? "uncited" : "none";
 }

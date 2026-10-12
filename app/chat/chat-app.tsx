@@ -463,7 +463,10 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
               setDropped((prev) => ({ ...prev, [ev.conversationId]: ev.dropped }));
               if (ev.summarized) setSettings((prev) => ({ ...prev, [ev.conversationId]: { ...(prev[ev.conversationId] ?? chatSettings), summarized: true } }));
             } else if (ev.t === "delta") patchReply((m) => ({ ...m, content: m.content + ev.v }));
-            else if (ev.t === "done") patchReply((m) => ({ ...m, status: ev.status === "partial" ? "partial" : "complete", sources: ev.sources }));
+            else if (ev.t === "done") {
+              // Same shape as a reloaded message: [] = files were searched but none used, undefined = no files involved.
+              patchReply((m) => ({ ...m, status: ev.status === "partial" ? "partial" : "complete", sources: ev.grounding === "none" ? undefined : ev.sources }));
+            }
             else if (ev.t === "tool_calls") toolTurn = { replyId: ev.replyId, text: ev.text ?? "", calls: ev.calls ?? [] };
             else if (ev.t === "error") patchReply((m) => ({ ...m, status: "error", error: errorText(ev.code, label, theme.appName) }));
           }
@@ -954,7 +957,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                           )
                         ) : (
                           <div className={`whitespace-pre-wrap ${theme.replyClass}`}>
-                            <AnswerText text={m.content} sources={m.sources} />
+                            <AnswerText text={m.content} sources={m.sources} final={m.status !== "streaming"} />
                             {m.status === "streaming" && <span aria-label="Writing" className="orbit-caret ml-0.5 inline-block h-4 w-1.5 rounded-sm bg-ice align-middle" />}
                             {m.status === "partial" && <span className="ml-1 text-xs text-ink-subtle">[stopped]</span>}
                           </div>
@@ -965,6 +968,11 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                         {m.kind === "text" && m.sources && m.sources.length > 0 && (
                           <SourceList sources={m.sources} />
                         )}
+                        {m.kind === "text" && m.status === "complete" && /couldn.t find this in your course files/i.test(m.content) ? (
+                          <p className="mt-3 inline-flex rounded-full bg-surface-200 px-3 py-1 text-xs font-medium text-warning">Not found in your course files</p>
+                        ) : m.kind === "text" && m.status === "complete" && m.sources && m.sources.length === 0 ? (
+                          <p className="mt-3 text-xs text-ink-subtle">Not from your files: this answer didn&apos;t use any passage from them.</p>
+                        ) : null}
                         {m.status === "error" && (
                           <div className="mt-2 rounded-xl border border-danger/30 bg-danger-surface p-3 text-sm text-danger">
                             {m.error ?? `${model?.label ?? "The model"} didn't respond. Your chat is saved.`}{" "}
