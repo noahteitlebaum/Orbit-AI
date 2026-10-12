@@ -12,6 +12,7 @@ export async function GET(_: Request, ctx: RouteContext<"/api/conversations/[id]
 
   const { data: conv } = await auth.supabase.from("conversations").select("id, mode, course_only, summary").eq("id", id).maybeSingle();
   if (!conv) return json({ error: "not_found" }, 404);
+  const { data: q } = await auth.supabase.from("conversations").select("quiz_state").eq("id", id).maybeSingle(); // migration 0006
   const cols = "id, role, kind, content, image_path, model_id, status, attachment_ids, sources";
   const load = (extra: string) => auth.supabase.from("messages").select(cols + extra).eq("conversation_id", id).order("seq");
   // tool_log arrives with migration 0004; chats still load if it hasn't been run yet.
@@ -38,6 +39,7 @@ export async function GET(_: Request, ctx: RouteContext<"/api/conversations/[id]
     mode: conv.mode,
     courseOnly: conv.course_only,
     summarized: Boolean(conv.summary),
+    quiz: q?.quiz_state ?? null,
     messages: (rows ?? []).map((m) => ({
       id: m.id,
       role: m.role,

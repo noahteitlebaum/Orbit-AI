@@ -1,6 +1,7 @@
 "use client";
 
 import { Fragment, useState } from "react";
+import { hideQuizMarkers } from "@/lib/chat/quiz";
 
 // An answer with its course-file references. [S1] markers become small numbered chips; the list under the
 // answer shows exactly which file and page/slide each one came from (only passages the answer actually cited).
@@ -27,7 +28,7 @@ export function citationParts(text: string, sources: Source[] | undefined, final
 export function AnswerText({ text, sources, final = true }: { text: string; sources?: Source[]; final?: boolean }) {
   return (
     <>
-      {citationParts(text, sources, final).map((p, i) =>
+      {citationParts(hideQuizMarkers(text), sources, final).map((p, i) =>
         "text" in p ? (
           <Fragment key={i}>{p.text}</Fragment>
         ) : (

@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { FOLDER_ACCESS, IMAGE_MODELS, PROVIDERS, defaultModelFor, getModel, modelsFor, type ProviderId } from "@/config/models";
 import { THEMES } from "@/config/themes";
+import { missedConcepts, type QuizState } from "@/lib/chat/quiz";
 import { answersLeft, answersText, isLow, timesCheaper, typicalAnswerMicros } from "@/lib/billing/estimate";
 import { signOut } from "../login/actions";
 import { ProviderLogo } from "@/components/provider-logo";
@@ -37,7 +38,7 @@ type Message = {
   toolLog?: ToolLogEntry[]; // saved file actions, as loaded from the server
 };
 type Pending = { key: string; file?: UploadedFile; name: string; uploading: boolean; error?: string };
-type ChatSettings = { mode: StudyMode; courseOnly: boolean; summarized?: boolean };
+type ChatSettings = { mode: StudyMode; courseOnly: boolean; summarized?: boolean; quiz?: QuizState | null };
 type ConvSummary = { id: string; title: string; modelId: string; projectId: string | null; updatedAt: string };
 type Project = { id: string; name: string; instructions: string };
 type Usage = { live: boolean; liveProviders?: ProviderId[]; allowance: number; spent: number; reserved: number; typical?: Record<string, number> };
@@ -185,12 +186,12 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     (async () => {
       const res = await fetch(`/api/conversations/${id}`).catch(() => null);
       if (!res || handleAuth(res) || !res.ok) return;
-      const out = (await res.json()) as { messages: Message[]; mode?: StudyMode; courseOnly?: boolean; summarized?: boolean };
+      const out = (await res.json()) as { messages: Message[]; mode?: StudyMode; courseOnly?: boolean; summarized?: boolean; quiz?: QuizState | null };
       const withActivity = out.messages.map((m) =>
         m.toolLog?.length ? { ...m, activity: m.toolLog.map((t, i) => ({ id: `${m.id}-${i}`, name: t.name, label: t.label, status: t.status })) } : m,
       );
       setMessages((prev) => (prev[id] ? prev : { ...prev, [id]: withActivity }));
-      setSettings((prev) => (prev[id] ? prev : { ...prev, [id]: { mode: out.mode ?? "chat", courseOnly: Boolean(out.courseOnly), summarized: out.summarized } }));
+      setSettings((prev) => (prev[id] ? prev : { ...prev, [id]: { mode: out.mode ?? "chat", courseOnly: Boolean(out.courseOnly), summarized: out.summarized, quiz: out.quiz } }));
     })();
   }, [active, messages, handleAuth]);
 
@@ -466,7 +467,14 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
             } else if (ev.t === "delta") patchReply((m) => ({ ...m, content: m.content + ev.v }));
             else if (ev.t === "done") {
               // Same shape as a reloaded message: [] = files were searched but none used, undefined = no files involved.
-              patchReply((m) => ({ ...m, status: ev.status === "partial" ? "partial" : "complete", sources: ev.grounding === "none" ? undefined : ev.sources }));
+              patchReply((m) => ({
+                ...m, status: ev.status === "partial" ? "partial" : "complete", sources: ev.grounding === "none" ? undefined : ev.sources,
+                ...(typeof ev.content === "string" ? { content: ev.content } : {}), // the saved text (quiz lines removed)
+              }));
+              if (ev.quiz !== undefined) {
+                const cid = convId ?? currentKey;
+                setSettings((prev) => ({ ...prev, [cid]: { ...(prev[cid] ?? chatSettings), quiz: ev.quiz } }));
+              }
             }
             else if (ev.t === "tool_calls") toolTurn = { replyId: ev.replyId, text: ev.text ?? "", calls: ev.calls ?? [] };
             else if (ev.t === "error") patchReply((m) => ({ ...m, status: "error", error: errorText(ev.code, label, theme.appName) }));
@@ -647,6 +655,24 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     </div>
   );
 
+  // Quiz progress for this chat: score kept by the server, and the concepts to come back to.
+  const quiz = chatSettings.mode === "quiz" ? chatSettings.quiz : null;
+  const toReview = missedConcepts(quiz).slice(0, 6);
+  const quizPanel = quiz && quiz.asked > 0 && (
+    <div role="status" className="mx-auto mb-2 flex max-w-3xl flex-wrap items-center gap-x-3 gap-y-1.5 rounded-2xl border border-line bg-surface-200 px-4 py-2.5 text-sm">
+      <span className="font-medium tabular-nums">Score {quiz.correct}/{quiz.asked}</span>
+      <span className="min-w-0 flex-1 text-ink-muted">
+        {toReview.length ? <>To review: {toReview.map((c) => (c.wrong > 1 ? `${c.concept} (missed ${c.wrong}×)` : c.concept)).join(", ")}</> : "Nothing to review yet — nice."}
+      </span>
+      {toReview.length > 0 && (
+        <button type="button" disabled={busy} onClick={() => send(`Quiz me again on what I missed: ${toReview.map((c) => c.concept).join(", ")}.`)}
+          className="rounded-full bg-brand px-3 py-1 text-xs font-medium text-on-brand disabled:opacity-50">
+          Practise what I missed
+        </button>
+      )}
+    </div>
+  );
+
   const placeholder = imageMode ? "Describe an image" : empty ? `Ask ${theme.appName}` : `Reply to ${theme.appName}…`;
   const textarea = (
     <textarea
@@ -694,6 +720,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       onPaste={(e) => { const imgs = Array.from(e.clipboardData.files); if (imgs.length) { e.preventDefault(); attachFiles(imgs); } }}>
       <input ref={fileInput} type="file" multiple accept={ACCEPT_ATTR} hidden onChange={(e) => { attachFiles(Array.from(e.target.files ?? [])); e.target.value = ""; }} />
       {lowBalance}
+      {quizPanel}
       {theme.inlineComposer ? (
         <div className={`mx-auto max-w-3xl py-2.5 pl-3 pr-3 transition ${theme.composerClass}`}>
           {pendingChips && <div className="px-2 pt-1">{pendingChips}</div>}

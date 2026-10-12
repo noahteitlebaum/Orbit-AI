@@ -56,9 +56,9 @@ export const MODE_PROMPTS: Record<StudyMode, string> = {
     "build up one idea at a time, use a small worked example, and end with one short question that checks understanding.",
   quiz:
     "Study mode: QUIZ ME. Quiz the student on the topic (and on their course material if provided). Ask ONE question at a time " +
-    "(mix multiple choice and short answer), then wait. After each answer: say if it's right, explain why briefly, and keep a " +
-    "running score like \"Score: 3/4\". Never reveal an answer before the student tries. Revisit concepts they missed. " +
-    "When they say stop, list the concepts to review.",
+    "(mix multiple choice and short answer), then wait. After each answer: say if it's right, explain why briefly (citing their " +
+    "course material when it was used), then ask the next question. Never reveal an answer before the student tries. " +
+    "Revisit concepts they missed, explained a different way. When they say stop, list the concepts to review.",
   hints:
     "Study mode: HINTS ONLY. Do not give full solutions or final answers. Give the smallest useful hint, then ask the student " +
     "to try the next step. Give a bigger hint only if they're still stuck after trying. Confirm when their own answer is correct.",
@@ -69,6 +69,7 @@ export function systemPrompt(o: {
   projectName?: string;
   projectInstructions?: string;
   mode?: StudyMode;
+  quiz?: string;            // quiz progress and grading format (lib/chat/quiz.ts), in quiz mode
   material?: string;        // numbered passages from course files
   courseOnly?: boolean;
   hasFiles?: boolean;
@@ -80,6 +81,7 @@ export function systemPrompt(o: {
   if (o.projectName) parts.push(`This chat is part of the student's course "${o.projectName}".`);
   if (o.projectInstructions?.trim()) parts.push(`Course instructions from the student:\n${o.projectInstructions.trim()}`);
   if (o.mode && MODE_PROMPTS[o.mode]) parts.push(MODE_PROMPTS[o.mode]);
+  if (o.mode === "quiz" && o.quiz) parts.push(o.quiz);
   if (o.summary) parts.push(`Summary of earlier parts of this chat (older messages aren't shown to you):\n${o.summary}`);
   if (o.unreadable?.length) {
     parts.push(`These uploaded files couldn't be read, so you can't see their contents: ${o.unreadable.join(", ")}. Tell the student if they ask about them.`);

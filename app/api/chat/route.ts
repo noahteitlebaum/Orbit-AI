@@ -5,6 +5,7 @@ import { isProviderDisabled, overRateLimit, reserve, settle } from "@/lib/billin
 import { buildContext, costMicros, estimateTokens, maxOutputFor, reservationMicros, STUDY_MODES, systemPrompt, type StudyMode } from "@/lib/chat/context";
 import { citedSources, gatherMaterial, grounding, IMAGE_TOKENS, loadImages, MAX_IMAGES, stripInventedCitations, type Source } from "@/lib/chat/material";
 import { SUMMARY_TOKENS, updateSummary } from "@/lib/chat/summary";
+import { applyResults, mergeQuiz, parseQuiz, quizContext, type QuizState } from "@/lib/chat/quiz";
 import { ADAPTERS, apiKeyFor, liveFor } from "@/lib/providers";
 import { ProviderError, type ChatTurn, type StreamEvent, type ToolCall, type Usage } from "@/lib/providers/types";
 import { FOLDER_TOOLS, folderPrompt, MAX_CALLS_PER_STEP, MAX_TOOL_STEPS } from "@/lib/folder/tools";
@@ -154,9 +155,23 @@ export async function POST(request: Request): Promise<Response> {
     if (await overRateLimit(user.id)) return json({ error: "rate_limited", conversationId: conversation.id }, 429);
   }
 
+  // ---- quiz progress (this chat + earlier quizzes in the course). quiz_state comes with migration 0006.
+  let quizState: QuizState | null = null;
+  let quizText = "";
+  if (conversation.mode === "quiz") {
+    const { data: q } = await supabase.from("conversations").select("quiz_state").eq("id", conversation.id).maybeSingle();
+    quizState = (q?.quiz_state as QuizState | null) ?? null;
+    let course: QuizState | null = null;
+    if (conversation.project_id) {
+      const { data: others } = await supabase.from("conversations").select("id, quiz_state").eq("project_id", conversation.project_id);
+      course = mergeQuiz((others ?? []).filter((c) => c.id !== conversation.id).map((c) => c.quiz_state as QuizState | null));
+    }
+    quizText = quizContext(quizState, course);
+  }
+
   const promptBase = {
     modelLabel: model.label, projectName: project?.name, projectInstructions: project?.instructions,
-    mode: conversation.mode as StudyMode, material: material.block, courseOnly: conversation.course_only,
+    mode: conversation.mode as StudyMode, quiz: quizText, material: material.block, courseOnly: conversation.course_only,
     hasFiles: material.hasFiles, unreadable: material.unreadable, notes: material.notes,
   };
   const stepsUsed = run?.steps.length ?? 0;
@@ -289,11 +304,17 @@ export async function POST(request: Request): Promise<Response> {
       const wantsTools = !failure && !stopped && calls.length > 0;
       const status = failure ? "error" : stopped || wantsTools ? "partial" : "complete";
       // References only point at passages that were really sent: made-up [S#] markers are removed from the saved text.
-      const savedText = stripInventedCitations(finalText, material.sources);
+      // Quiz results: the server keeps the score; the marker lines are removed from the saved answer.
+      const quiz = conversation.mode === "quiz" ? parseQuiz(finalText) : null;
+      const savedText = stripInventedCitations(quiz ? quiz.clean : finalText, material.sources);
       const sources = citedSources(savedText, material.sources);
       const ground = grounding(material.sources, sources);
       await supabase.from("messages").update({ content: savedText, status, sources: ground === "none" ? null : sources }).eq("id", replyId);
       await supabase.from("conversations").update({ updated_at: new Date().toISOString() }).eq("id", conversation.id);
+      if (quiz?.results.length && !failure) {
+        quizState = applyResults(quizState, quiz.results);
+        await supabase.from("conversations").update({ quiz_state: quizState }).eq("id", conversation.id);
+      }
       // File activity shown under the reply (needs migration 0004; skipped quietly if it hasn't been run).
       if (run) await supabase.from("messages").update({ tool_log: toolLog(run.steps) }).eq("id", replyId);
 
@@ -305,7 +326,7 @@ export async function POST(request: Request): Promise<Response> {
 
       if (failure) send({ t: "error", code: failure.code });
       else if (wantsTools) send({ t: "tool_calls", replyId, text: text.slice(priorText.length).trim(), calls });
-      else send({ t: "done", status, sources, grounding: ground });
+      else send({ t: "done", status, sources, grounding: ground, ...(conversation.mode === "quiz" ? { quiz: quizState, content: savedText } : {}) });
       try {
         controller.close();
       } catch {}

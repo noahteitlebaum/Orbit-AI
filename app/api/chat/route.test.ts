@@ -340,3 +340,22 @@ describe("persistent chats and model switching", () => {
     expect(state.lastArgs!.system).not.toContain("stale");
   });
 });
+
+describe("quiz progress", () => {
+  it("the server keeps score from the model's hidden result lines, saves it, and feeds it back next turn", async () => {
+    state.live = true;
+    state.events = [{ delta: "Not quite — it's n-1.\n[[quiz: wrong | Sample variance]]\nNext: what is a stratum?" }, { usage: { input: 10, output: 5, reasoning: 0, cached: 0 } }];
+    const first = await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "n", mode: "quiz" })));
+    const done = first.at(-1);
+    expect(done).toMatchObject({ t: "done", quiz: { asked: 1, correct: 0 }, content: "Not quite — it's n-1.\n\nNext: what is a stratum?" });
+    const conv = state.fake!.db.conversations[0];
+    expect(conv.quiz_state).toMatchObject({ concepts: { "Sample variance": { right: 0, wrong: 1 } } });
+    expect(state.fake!.db.messages.find((m) => m.role === "assistant")!.content).not.toContain("[[quiz");
+
+    state.events = [{ delta: "Correct!\n[[quiz: right | Strata]]" }, { usage: { input: 10, output: 5, reasoning: 0, cached: 0 } }];
+    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "a subgroup", conversationId: conv.id, mode: "quiz" })));
+    expect(state.lastArgs!.system).toContain("Score so far in this chat: 0/1");
+    expect(state.lastArgs!.system).toContain("Missed in this chat (bring these back, explained a different way): Sample variance");
+    expect(state.fake!.db.conversations[0].quiz_state).toMatchObject({ asked: 2, correct: 1 });
+  });
+});
