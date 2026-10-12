@@ -54,6 +54,27 @@ export async function overRateLimit(userId: string, max = 12): Promise<boolean> 
   return (count ?? 0) >= max;
 }
 
+/** The student's average actual cost per answer, by model, from their last 100 settled answers (for estimates). */
+export async function recentAnswerCosts(userId: string): Promise<Record<string, number>> {
+  const { data } = await createAdminClient()
+    .from("ledger")
+    .select("model_id, actual_micros")
+    .eq("user_id", userId)
+    .eq("kind", "text")
+    .eq("state", "settled")
+    .order("created_at", { ascending: false })
+    .limit(100);
+  const sums = new Map<string, { total: number; n: number }>();
+  for (const r of data ?? []) {
+    const s = sums.get(r.model_id) ?? { total: 0, n: 0 };
+    s.total += Number(r.actual_micros ?? 0);
+    s.n++;
+    sums.set(r.model_id, s);
+  }
+  // Need a few answers before trusting the average.
+  return Object.fromEntries([...sums].filter(([, s]) => s.n >= 3).map(([id, s]) => [id, Math.ceil(s.total / s.n)]));
+}
+
 export async function getUsage(userId: string): Promise<{ allowance: number; spent: number; reserved: number } | null> {
   const { data } = await createAdminClient()
     .from("budgets")

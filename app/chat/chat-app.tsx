@@ -5,6 +5,7 @@ import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { FOLDER_ACCESS, IMAGE_MODELS, PROVIDERS, defaultModelFor, getModel, modelsFor, type ProviderId } from "@/config/models";
 import { THEMES } from "@/config/themes";
+import { answersLeft, answersText, isLow, timesCheaper, typicalAnswerMicros } from "@/lib/billing/estimate";
 import { signOut } from "../login/actions";
 import { ProviderLogo } from "@/components/provider-logo";
 import { ModelMenu } from "@/components/model-menu";
@@ -39,7 +40,7 @@ type Pending = { key: string; file?: UploadedFile; name: string; uploading: bool
 type ChatSettings = { mode: StudyMode; courseOnly: boolean; summarized?: boolean };
 type ConvSummary = { id: string; title: string; modelId: string; projectId: string | null; updatedAt: string };
 type Project = { id: string; name: string; instructions: string };
-type Usage = { live: boolean; liveProviders?: ProviderId[]; allowance: number; spent: number; reserved: number };
+type Usage = { live: boolean; liveProviders?: ProviderId[]; allowance: number; spent: number; reserved: number; typical?: Record<string, number> };
 
 const APP_KEY = "polar.app.v1";
 const DRAFT = "draft"; // messages key for a chat that hasn't been saved yet
@@ -49,7 +50,7 @@ const dollars = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
 
 function errorText(code: string, label: string, appName: string): string {
   switch (code) {
-    case "budget": return "You've used your budget, so this reply was paused. Your chat is saved.";
+    case "budget": return `You don't have enough budget left for a ${label} answer, so this reply was paused. Your chat is saved.`;
     case "paused": return "Orbit AI is paused by the team right now. Your chat is saved — try again later.";
     case "rate_limited": return "That's a lot of messages in a minute. Wait a moment, then try again.";
     case "not_configured": return `${label} isn't set up yet (missing API key or price).`;
@@ -620,18 +621,27 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     </button>
   );
 
-  // Warn before the budget runs out and offer the app's cheapest model.
+  // Warn while there's still room to finish the session, in answers rather than dollars, and offer the cheapest model.
   const remainingNow = usage?.live ? usage.allowance - usage.spent - usage.reserved : Infinity;
-  const cheapest = [...modelsFor(provider)].sort((a, b) => a.outputPrice - b.outputPrice)[0];
-  const lowBalance = usage?.live && remainingNow < Math.max(500_000, usage.allowance * 0.1) && (
-    <div className="mx-auto mb-2 flex max-w-3xl flex-wrap items-center gap-2 rounded-2xl border border-line bg-surface-200 px-4 py-2.5 text-sm">
-      <span className="flex-1">
-        {remainingNow <= 0 ? "You've used your budget." : `Only ${dollars(Math.max(0, remainingNow))} left.`}{" "}
-        <span className="text-ink-muted">Each message is charged by length; longer chats and files cost more.</span>
+  const cheapest = [...modelsFor(provider)].sort((a, b) => typicalAnswerMicros(a, usage?.typical) - typicalAnswerMicros(b, usage?.typical))[0];
+  const perAnswer = currentModel ? typicalAnswerMicros(currentModel, usage?.typical) : 0;
+  const cheapPerAnswer = cheapest ? typicalAnswerMicros(cheapest, usage?.typical) : 0;
+  const offerCheaper = cheapest && cheapest.id !== modelId && remainingNow >= cheapPerAnswer;
+  const lowBalance = usage?.live && currentModel && isLow(remainingNow, usage.allowance, perAnswer) && (
+    <div role="status" className="mx-auto mb-2 flex max-w-3xl flex-wrap items-center gap-2 rounded-2xl border border-line bg-surface-200 px-4 py-2.5 text-sm">
+      <span className="min-w-0 flex-1">
+        {remainingNow < perAnswer
+          ? `Not enough budget left for a ${currentModel.short} answer.`
+          : `Running low: ${answersText(answersLeft(remainingNow, currentModel, usage.typical))} with ${currentModel.short}.`}{" "}
+        {offerCheaper && (
+          <span className="text-ink-muted">
+            {cheapest.short} is {timesCheaper(perAnswer, cheapPerAnswer) > 1 ? `about ${timesCheaper(perAnswer, cheapPerAnswer)}× cheaper` : "cheaper"} ({answersText(answersLeft(remainingNow, cheapest, usage.typical))}).
+          </span>
+        )}
       </span>
-      {cheapest && cheapest.id !== modelId && remainingNow > 0 && (
+      {offerCheaper && (
         <button type="button" onClick={() => setModel(cheapest.id)} className="rounded-full bg-brand px-3 py-1 text-xs font-medium text-on-brand">
-          Switch to {cheapest.label} (cheaper)
+          Switch to {cheapest.short}
         </button>
       )}
     </div>
@@ -824,10 +834,27 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
               {usage?.live ? `${dollars(remaining)} left of ${dollars(usage.allowance)}` : "Replies are fake"}
             </span>
           </div>
+          {usage?.live && currentModel && (
+            <p className="mb-1.5 text-xs text-ink-muted">
+              {answersText(answersLeft(remaining, currentModel, usage.typical)).replace(/^about/, "About")} with {currentModel.short}
+              {usage.reserved > 0 && " · a reply is in progress"}
+            </p>
+          )}
           <div className="h-1.5 overflow-hidden rounded-full bg-surface-300" role="meter" aria-label="Budget used"
             aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(usedPct)}>
             <div className="h-full rounded-full bg-brand transition-all" style={{ width: `${usedPct}%` }} />
           </div>
+          {usage?.live && (
+            <details className="mt-2 text-xs text-ink-muted">
+              <summary className="cursor-pointer select-none text-ink-subtle hover:text-ink-muted">How your budget works</summary>
+              <ul className="mt-1.5 list-disc space-y-1 pl-4">
+                <li>Each answer costs a little, based on how long the chat, files and answer are. Bigger models cost more per answer.</li>
+                <li>Before an answer starts, its most it could cost is set aside, so you can never go over. Afterwards you only pay what it really cost; the rest comes back.</li>
+                <li>Long chats and big files cost more per answer. Starting a new chat, or a cheaper model, makes your budget last longer.</li>
+                <li>If an answer fails before it starts, you aren&apos;t charged.</li>
+              </ul>
+            </details>
+          )}
           <p className="mt-3 truncate text-xs text-ink-subtle">{email}</p>
           <form action={signOut}>
             <button className="mt-0.5 text-xs text-ink-subtle underline underline-offset-[3px] hover:text-ink-muted">Sign out</button>
@@ -976,6 +1003,11 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                         {m.status === "error" && (
                           <div className="mt-2 rounded-xl border border-danger/30 bg-danger-surface p-3 text-sm text-danger">
                             {m.error ?? `${model?.label ?? "The model"} didn't respond. Your chat is saved.`}{" "}
+                            {m.kind === "text" && m.error?.includes("budget left") && offerCheaper && (
+                              <button onClick={() => setModel(cheapest.id)} disabled={busy} className="mr-3 font-medium underline underline-offset-[3px]">
+                                Switch to {cheapest.short}
+                              </button>
+                            )}
                             {m.kind === "text" && <button onClick={() => send("", true)} disabled={busy} className="font-medium underline underline-offset-[3px]">Try again</button>}
                           </div>
                         )}
