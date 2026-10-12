@@ -1,3 +1,4 @@
+import { DATA_FILE } from "@/lib/code/tools";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { referenceLabel } from "@/lib/files/extract";
 import type { TurnDocument, TurnImage } from "@/lib/providers/types";
@@ -37,6 +38,7 @@ export interface Material {
   tokens: number;        // text passages + visual pages
   visualTokens: number;  // visual pages + course images only (the passages are counted with the system prompt)
   hasFiles: boolean;
+  dataFiles: string[];   // CSV/Excel/… files the Python tool can open from /data
 }
 
 export async function gatherMaterial(
@@ -69,8 +71,9 @@ export async function gatherMaterial(
   // The model always knows what the course contains, even when nothing matches this question.
   const courseFiles = opts.projectId ? all.filter((f) => f.project_id === opts.projectId) : [];
   if (courseFiles.length) notes.push(`Files in this course: ${courseIndex(courseFiles)}. If the answer is probably in one of them but nothing below covers it, say which file and ask the student to point to the page or topic.`);
+  const dataFiles = [...new Set(all.filter((f) => f.status !== "failed" && DATA_FILE.test(f.name)).map((f) => f.name))];
   const imageTokens = images.length * IMAGE_TOKENS;
-  const empty = { sources: [], block: "", unreadable, notes, documents: [], images, tokens: imageTokens, visualTokens: imageTokens, hasFiles: all.length > 0 };
+  const empty = { sources: [], block: "", unreadable, notes, documents: [], images, tokens: imageTokens, visualTokens: imageTokens, hasFiles: all.length > 0, dataFiles };
   if (!ready.length) return empty;
 
   const byId = new Map(ready.map((f) => [f.id, f]));
@@ -169,7 +172,7 @@ export async function gatherMaterial(
     });
   }
   visualTokens += imageTokens;
-  return { sources, block: blocks.join("\n\n"), unreadable, notes, documents, images, tokens: tokens + visualTokens, visualTokens, hasFiles: true };
+  return { sources, block: blocks.join("\n\n"), unreadable, notes, documents, images, tokens: tokens + visualTokens, visualTokens, hasFiles: true, dataFiles };
 }
 
 /** "lecture3.pdf (24 pages), syllabus.docx, …" — what the course holds, for the model. */

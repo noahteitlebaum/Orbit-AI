@@ -2,7 +2,21 @@ import { dbError, isUuid, json, requireAppUser } from "@/lib/api";
 
 // PATCH  /api/files/:id { projectId } → save a chat attachment to a course (or take it out with null), so every chat
 //                                       in the course can use it without uploading it again. It stays in its chat too.
+// GET    /api/files/:id → a short-lived download link for the student's own file (the Python sandbox reads data files).
 // DELETE /api/files/:id → removes the stored file, its passages, and its row.
+export async function GET(_: Request, ctx: RouteContext<"/api/files/[id]">) {
+  const auth = await requireAppUser();
+  if ("error" in auth) return auth.error;
+  const { id } = await ctx.params;
+  if (!isUuid(id)) return json({ error: "not_found" }, 404);
+  // RLS: only the student's own rows are visible.
+  const { data: file } = await auth.supabase.from("files").select("name, storage_path").eq("id", id).maybeSingle();
+  if (!file) return json({ error: "not_found" }, 404);
+  const { data, error } = await auth.supabase.storage.from("uploads").createSignedUrl(file.storage_path, 60);
+  if (error || !data) return json({ error: "download_failed" }, 500);
+  return json({ name: file.name, url: data.signedUrl });
+}
+
 export async function PATCH(request: Request, ctx: RouteContext<"/api/files/[id]">) {
   const auth = await requireAppUser();
   if ("error" in auth) return auth.error;

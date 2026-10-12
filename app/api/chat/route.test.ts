@@ -291,6 +291,32 @@ describe("folder tools", () => {
   });
 });
 
+describe("code execution", () => {
+  it("offers run_python when the browser can run code, with the course's data files named", async () => {
+    state.live = true;
+    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "hi" })));
+    expect(state.lastArgs!.tools).toBeUndefined();
+    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "average my lab data", code: true })));
+    expect(state.lastArgs!.tools!.map((t) => t.name)).toEqual(["run_python"]);
+    expect(state.lastArgs!.system).toContain("run_python");
+    expect(state.lastArgs!.system).toContain("Explaining code is not the same as running it");
+  });
+
+  it("continues a reply after a Python run and saves the code and output", async () => {
+    state.live = true;
+    const call = { id: "p1", name: "run_python", args: { code: "print(2 + 2)" } };
+    state.events = [{ toolCall: call }, { usage: { input: 10, output: 5, reasoning: 0, cached: 0 } }];
+    const first = await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "what is 2+2", code: true })));
+    expect(first.at(-1)).toMatchObject({ t: "tool_calls", calls: [call] });
+    state.events = [{ delta: "It's 4." }, { usage: { input: 20, output: 5, reasoning: 0, cached: 0 } }];
+    const steps = [{ text: "", calls: [call], results: [{ id: "p1", output: "Printed output:\n4", status: "ok" }] }];
+    const events = await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", conversationId: first[0].conversationId, code: true, run: { replyId: first.at(-1).replyId, steps } })));
+    expect(events.at(-1)).toMatchObject({ t: "done", status: "complete" });
+    const reply = state.fake!.db.messages.find((m) => m.role === "assistant")!;
+    expect(reply.tool_log).toEqual([expect.objectContaining({ name: "run_python", label: "Ran Python", status: "ok", code: "print(2 + 2)", output: "Printed output:\n4" })]);
+  });
+});
+
 describe("persistent chats and model switching", () => {
   async function ask(body: Record<string, unknown>) {
     return readEvents(await POST(req({ provider: "anthropic", ...body })));

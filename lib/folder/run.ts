@@ -1,5 +1,5 @@
 import type { ChatTurn, ToolCall, ToolResult } from "@/lib/providers/types";
-import { describeCall, isFolderTool, MAX_CALLS_PER_STEP, MAX_RESULT_CHARS, MAX_RUN_TOOL_CHARS, MAX_TOOL_STEPS } from "./tools";
+import { describeCall, isKnownTool, MAX_CALLS_PER_STEP, MAX_RESULT_CHARS, MAX_RUN_TOOL_CHARS, MAX_TOOL_STEPS } from "./tools";
 
 // A "run" is one student message that the model answers in several rounds: it calls folder tools, the browser runs
 // them on the student's folder (after the student approves any change), and sends the results back here.
@@ -8,7 +8,8 @@ import { describeCall, isFolderTool, MAX_CALLS_PER_STEP, MAX_RESULT_CHARS, MAX_R
 export type ResultStatus = "ok" | "declined" | "error";
 export type StepResult = ToolResult & { status: ResultStatus };
 export type Step = { text: string; calls: ToolCall[]; results: StepResult[] };
-export type ToolLogEntry = { name: string; label: string; status: ResultStatus };
+// code/output: for Python runs, so the code and what it printed are still there when the chat is reopened.
+export type ToolLogEntry = { name: string; label: string; status: ResultStatus; code?: string; output?: string };
 
 const MAX_TEXT = 50_000;
 const MAX_ARGS_CHARS = 100_000;
@@ -26,12 +27,12 @@ export function parseSteps(raw: unknown): Step[] | null {
     if (s.calls.length === 0 || s.calls.length > MAX_CALLS_PER_STEP || s.results.length !== s.calls.length) return null;
     const calls: ToolCall[] = [];
     for (const c of s.calls) {
-      if (!isObj(c) || !isId(c.id) || !isFolderTool(c.name) || !isObj(c.args)) return null;
+      if (!isObj(c) || !isId(c.id) || !isKnownTool(c.name) || !isObj(c.args)) return null;
       if (JSON.stringify(c.args).length > MAX_ARGS_CHARS) return null;
       const meta = isObj(c.meta)
         ? { thoughtSignature: typeof c.meta.thoughtSignature === "string" ? c.meta.thoughtSignature.slice(0, 20_000) : undefined, providerId: c.meta.providerId === true }
         : undefined;
-      calls.push({ id: c.id, name: c.name, args: c.args, ...(meta ? { meta } : {}) });
+      calls.push({ id: c.id, name: c.name as string, args: c.args, ...(meta ? { meta } : {}) });
     }
     const results: StepResult[] = [];
     for (let i = 0; i < s.results.length; i++) {
@@ -72,5 +73,10 @@ export function stepTurns(steps: Step[]): ChatTurn[] {
 }
 
 export function toolLog(steps: Step[]): ToolLogEntry[] {
-  return steps.flatMap((s) => s.calls.map((c, i) => ({ name: c.name, label: describeCall(c.name, c.args), status: s.results[i].status })));
+  return steps.flatMap((s) =>
+    s.calls.map((c, i) => ({
+      name: c.name, label: describeCall(c.name, c.args), status: s.results[i].status,
+      ...(c.name === "run_python" ? { code: String(c.args.code ?? "").slice(0, 20_000), output: s.results[i].output.slice(0, 8_000) } : {}),
+    })),
+  );
 }

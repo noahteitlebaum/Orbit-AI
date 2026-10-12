@@ -36,8 +36,15 @@ npm run test:live  # small opt-in live checks against all 4 providers (costs mon
 9. **Payments stay disabled** (`PAYMENTS_ENABLED=false`) until Jake gives the final rules.
 10. Use synthetic accounts and data only. Never use real student chats in prompts, tests or screenshots.
 
+## Code execution (run_python)
+- Runs in the student's browser: Pyodide (WebAssembly) in a module Web Worker (`public/python-worker.mjs`), driven by `lib/code/runner.ts`. No server sandbox, no extra cost.
+- Fresh worker per run, terminated after. Network (fetch/XHR/WebSocket/importScripts) is replaced with errors while user code runs; packages load just before.
+- Limits: 30 s per run (120 s for first-time setup), browser WebAssembly memory cap (crash = memory limit), outputs ≤ 20 files / 10 MB each / 25 MB total.
+- Data files (csv/tsv/xlsx/json/txt from the chat and its course) go to /data via `GET /api/files/:id` (60 s signed link). Outputs in /output become downloads; unsaved matplotlib figures are saved automatically.
+- The model is told to run calculations and code instead of guessing. Code and printed output are kept in `messages.tool_log`; output files last only while the page is open.
+
 ## Out of scope for launch (don't build unless the team agrees)
-Model comparison, smart model routing, connectors (Drive/GitHub…), coding/computer agents beyond folder access, code execution, voice, saved memories.
+Model comparison, smart model routing, connectors (Drive/GitHub…), coding/computer agents beyond folder access, voice, saved memories.
 **Built (Noah + Jake's backend memo, Oct 2026):** file/image uploads — PDF, Word, PowerPoint (per slide), Excel/CSV (per sheet, as rows), notebooks, code and any text file; phone photos are shrunk/converted in the browser — with page references (PDF pages that are scanned or have diagrams are read visually by ChatGPT/Claude/Gemini, a few per question; pictures in Word files, skipped pages and unmatched course images are named to the model, never silently dropped), courses (one app each: instructions + reusable files), grounded answers with [S#] sources and a "use only my course material" switch, web search (Tavily, "Search the web" toggle; one search per question, charged against the allowance, saved on the question and reused across models; cited as [W#] with links, kept apart from course files [S#] — `lib/search/web.ts`, `config/search.ts`), study modes (explain / quiz me / hints; quiz score and missed concepts are kept by the server from hidden `[[quiz: right|wrong | concept]]` lines, saved per chat and reused across the course — `lib/chat/quiz.ts`), running summaries for long chats, low-balance warning with a cheaper-model offer, image generation (Gemini, Grok; OpenAI once its price is set). **Folder access (Noah, Oct 11 2026):** students can connect one folder on their computer with the browser's folder picker (File System Access API, Chrome/Edge; nothing to install; `lib/folder/browser-fs.ts`); all four AIs can list/read/search and write/edit/move/delete files there; changes need the student's Apply unless they chose "Don't ask for edits" (deletes always ask). Everything that calls a model goes through the same reserve → call → settle budget path, including each round of a file-action reply.
 
 ## Where things live (server)

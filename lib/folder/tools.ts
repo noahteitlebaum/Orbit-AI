@@ -71,6 +71,9 @@ export function isFolderTool(name: unknown): name is FolderToolName {
   return typeof name === "string" && BY_NAME.has(name as FolderToolName);
 }
 
+/** Any tool a model may call: folder tools or the Python sandbox. */
+export const isKnownTool = (name: unknown): boolean => isFolderTool(name) || name === "run_python";
+
 export function isWriteTool(name: string): boolean {
   return BY_NAME.get(name as FolderToolName)?.write ?? false;
 }
@@ -87,6 +90,7 @@ export function describeCall(name: string, args: Record<string, unknown>): strin
     case "make_folder": return `Create folder ${s("path")}`;
     case "move_path": return `Move ${s("from")} → ${s("to")}`;
     case "delete_path": return `Delete ${s("path")}`;
+    case "run_python": return "Ran Python";
     default: return name;
   }
 }

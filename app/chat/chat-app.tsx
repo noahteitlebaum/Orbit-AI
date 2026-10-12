@@ -19,6 +19,8 @@ import { FolderDialog } from "@/components/folder-dialog";
 import { FolderActivity, previewFor, type Activity } from "@/components/folder-activity";
 import { loadApprovalMode, loadFolder, permission, runFolderTool, saveApprovalMode, saveFolder, type ApprovalMode, type FolderLink } from "@/lib/folder/browser-fs";
 import { describeCall, isFolderTool, isWriteTool } from "@/lib/folder/tools";
+import { codeSupported, resultForModel, runPython, type RunFile, type RunResult } from "@/lib/code/runner";
+import { DATA_FILE, isCodeTool } from "@/lib/code/tools";
 import type { Step, StepResult, ToolLogEntry } from "@/lib/folder/run";
 import type { ToolCall } from "@/lib/providers/types";
 
@@ -95,6 +97,11 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
   const [folder, setFolder] = useState<FolderLink | null>(null); // folder the student connected (browser folder access)
   const [folderOnline, setFolderOnline] = useState(false); // false = the browser wants permission again
   const [folderDialog, setFolderDialog] = useState(false);
+  const [codeOk, setCodeOk] = useState(false); // this browser can run Python (known only after mount)
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setCodeOk(codeSupported());
+  }, []);
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>("ask"); // read from storage after mount
   const approvals = useRef(new Map<string, (approve: boolean) => void>()); // file changes waiting for Apply / Skip
   const fileInput = useRef<HTMLInputElement>(null);
@@ -188,7 +195,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       if (!res || handleAuth(res) || !res.ok) return;
       const out = (await res.json()) as { messages: Message[]; mode?: StudyMode; courseOnly?: boolean; summarized?: boolean; quiz?: QuizState | null };
       const withActivity = out.messages.map((m) =>
-        m.toolLog?.length ? { ...m, activity: m.toolLog.map((t, i) => ({ id: `${m.id}-${i}`, name: t.name, label: t.label, status: t.status })) } : m,
+        m.toolLog?.length ? { ...m, activity: m.toolLog.map((t, i) => ({ id: `${m.id}-${i}`, name: t.name, label: t.label, status: t.status, code: t.code, stdout: t.output })) } : m,
       );
       setMessages((prev) => (prev[id] ? prev : { ...prev, [id]: withActivity }));
       setSettings((prev) => (prev[id] ? prev : { ...prev, [id]: { mode: out.mode ?? "chat", courseOnly: Boolean(out.courseOnly), summarized: out.summarized, quiz: out.quiz } }));
@@ -420,9 +427,16 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       }
     }
 
-    const common = { provider, modelId, mode: chatSettings.mode, courseOnly: chatSettings.courseOnly, web: Boolean(chatSettings.web), folder: link ? { name: link.name } : undefined };
+    // Data files the Python sandbox gets in /data: this chat's attachments and the course's files.
+    const dataFiles = new Map<string, string>();
+    for (const f of [...(messages[key] ?? []).flatMap((m) => m.attachments ?? []), ...ready.map((p) => p.file!), ...(activeProject ? courseFiles[activeProject.id] ?? [] : [])]) {
+      if (f.status !== "failed" && DATA_FILE.test(f.name)) dataFiles.set(f.id, f.name);
+    }
+    const code = codeSupported();
+    const common = { provider, modelId, mode: chatSettings.mode, courseOnly: chatSettings.courseOnly, web: Boolean(chatSettings.web), code, folder: link ? { name: link.name } : undefined };
     let body: object = { ...common, content, retry, attachmentIds, conversationId: convId, projectId: active ? undefined : filter };
     const steps: Step[] = [];
+    const dataCache = new Map<string, RunFile>(); // data files downloaded once per reply
     try {
       // One request per model round. When the model asks for file actions, run them here (after Apply for changes),
       // then send the results back to continue the same reply.
@@ -481,11 +495,11 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
           }
         }
         if (!toolTurn) break;
-        if (!link) {
+        if (!link && toolTurn.calls.some((c) => isFolderTool(c.name))) {
           patchReply((m) => ({ ...m, status: "partial" }));
           break;
         }
-        const results = await runToolCalls(link, toolTurn.calls, patchReply, controller.signal);
+        const results = await runToolCalls(link, toolTurn.calls, patchReply, controller.signal, { files: dataFiles, cache: dataCache });
         if (controller.signal.aborted) {
           patchReply((m) => ({ ...m, status: "partial" }));
           break;
@@ -507,7 +521,10 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
 
   // Run the model's file actions on the connected folder. Reads run straight away; changes are checked
   // first (dry run), then wait for the student's Apply / Skip.
-  async function runToolCalls(link: FolderLink, calls: ToolCall[], patchReply: (fn: (m: Message) => Message) => void, signal: AbortSignal): Promise<StepResult[]> {
+  async function runToolCalls(
+    link: FolderLink | null, calls: ToolCall[], patchReply: (fn: (m: Message) => Message) => void, signal: AbortSignal,
+    data: { files: Map<string, string>; cache: Map<string, RunFile> },
+  ): Promise<StepResult[]> {
     const results: StepResult[] = [];
     for (const c of calls) {
       const actId = `${c.id}:${tmpId()}`;
@@ -526,8 +543,33 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
         results.push({ id: c.id, name: c.name, output: "Stopped by the student.", status: "declined" });
         continue;
       }
-      if (!isFolderTool(c.name)) {
-        fail(`Unknown tool ${c.name}.`);
+      if (isCodeTool(c.name)) {
+        // Python runs in a sandbox in this browser (no network, time and memory limits); nothing to approve.
+        const src = typeof c.args.code === "string" ? c.args.code : "";
+        setAct({ status: "running", code: src });
+        const missing: string[] = [];
+        const files: RunFile[] = [];
+        for (const [id, name] of data.files) {
+          let f = data.cache.get(id);
+          if (!f) {
+            const bytes = await downloadFile(id, signal);
+            if (!bytes) {
+              missing.push(name);
+              continue;
+            }
+            f = { name, bytes };
+            data.cache.set(id, f);
+          }
+          files.push({ name: f.name, bytes: f.bytes.slice(0) }); // the worker takes its own copy
+        }
+        const r = await runPython(src, files, signal);
+        setAct({ status: r.ok ? "ok" : "error", stdout: [r.stdout, r.stderr].filter((x) => x.trim()).join("\n").trim(), detail: r.error ?? undefined, outputs: r.files });
+        const note = missing.length ? `\n\nCouldn't load these data files: ${missing.join(", ")}.` : "";
+        results.push({ id: c.id, name: c.name, output: resultForModel(r) + note, status: r.ok ? "ok" : "error" });
+        continue;
+      }
+      if (!isFolderTool(c.name) || !link) {
+        fail(link ? `Unknown tool ${c.name}.` : "No folder is connected.");
         continue;
       }
       setAct({ status: "running" });
@@ -560,6 +602,37 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       } else fail(out.error);
     }
     return results;
+  }
+
+  // The student edited the AI's code and runs it again (same data files; the AI isn't asked again).
+  const rerunCache = useRef(new Map<string, RunFile>());
+  async function rerunPython(code: string): Promise<RunResult> {
+    const signal = new AbortController().signal;
+    const files: RunFile[] = [];
+    for (const f of [...(messages[msgKey] ?? []).flatMap((m) => m.attachments ?? []), ...(activeProject ? courseFiles[activeProject.id] ?? [] : [])]) {
+      if (f.status === "failed" || !DATA_FILE.test(f.name) || files.some((x) => x.name === f.name)) continue;
+      let got = rerunCache.current.get(f.id);
+      if (!got) {
+        const bytes = await downloadFile(f.id, signal);
+        if (!bytes) continue;
+        got = { name: f.name, bytes };
+        rerunCache.current.set(f.id, got);
+      }
+      files.push({ name: got.name, bytes: got.bytes.slice(0) });
+    }
+    return runPython(code, files);
+  }
+
+  async function downloadFile(id: string, signal: AbortSignal): Promise<ArrayBuffer | null> {
+    try {
+      const res = await fetch(`/api/files/${id}`, { signal });
+      if (!res.ok) return null;
+      const { url } = (await res.json()) as { url: string };
+      const file = await fetch(url, { signal });
+      return file.ok ? await file.arrayBuffer() : null;
+    } catch {
+      return null;
+    }
   }
 
   function linkFolder(next: FolderLink) {
@@ -1018,7 +1091,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                           </div>
                         )}
                         {m.activity && m.activity.length > 0 && (
-                          <FolderActivity items={m.activity} onDecide={(id, ok) => approvals.current.get(id)?.(ok)} />
+                          <FolderActivity items={m.activity} onDecide={(id, ok) => approvals.current.get(id)?.(ok)} onRun={codeOk ? rerunPython : undefined} />
                         )}
                         {m.kind === "text" && m.sources && m.sources.length > 0 && (
                           <SourceList sources={m.sources} />

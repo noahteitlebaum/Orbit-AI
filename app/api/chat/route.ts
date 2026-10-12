@@ -11,11 +11,13 @@ import { applyResults, mergeQuiz, parseQuiz, quizContext, type QuizState } from 
 import { ADAPTERS, apiKeyFor, liveFor } from "@/lib/providers";
 import { ProviderError, type ChatTurn, type StreamEvent, type ToolCall, type Usage } from "@/lib/providers/types";
 import { FOLDER_TOOLS, folderPrompt, MAX_CALLS_PER_STEP, MAX_TOOL_STEPS } from "@/lib/folder/tools";
+import { CODE_TOOLS, codePrompt } from "@/lib/code/tools";
 import { parseSteps, stepTurns, toolLog, type Step } from "@/lib/folder/run";
 
 // POST /api/chat — auth → ownership → gates → context (+ course material, images, summary) → reserve → stream → reconcile → save.
 // Body: { provider, modelId, content, conversationId?, projectId?, retry?, attachmentIds?, mode?, courseOnly?, folder?, run? }
 //   folder: { name } — the student connected a folder in the browser, so the model gets file tools.
+//   code: true — the browser can run Python (lib/code/runner.ts), so the model gets run_python.
 //   run: { replyId, steps } — continue a reply after the browser ran the model's tool calls (see lib/folder/run.ts).
 // Response: newline-delimited JSON events: meta, delta…, then done (with cited sources), tool_calls (browser runs
 // them, then calls again with run), or error.
@@ -23,7 +25,7 @@ export const maxDuration = 300;
 
 type Body = {
   provider?: unknown; modelId?: unknown; content?: unknown; conversationId?: unknown; projectId?: unknown; retry?: unknown;
-  attachmentIds?: unknown; mode?: unknown; courseOnly?: unknown; folder?: unknown; run?: unknown; web?: unknown;
+  attachmentIds?: unknown; mode?: unknown; courseOnly?: unknown; folder?: unknown; run?: unknown; web?: unknown; code?: unknown;
 };
 type Row = { id: string; seq: number; role: "user" | "assistant"; content: string; status: string; kind: string; attachment_ids: string[] | null; model_id: string | null };
 
@@ -225,10 +227,12 @@ export async function POST(request: Request): Promise<Response> {
     hasFiles: material.hasFiles, unreadable: material.unreadable, notes: [...material.notes, ...webNotes], web: webBlock,
   };
   const stepsUsed = run?.steps.length ?? 0;
-  const tools = folderName && stepsUsed < MAX_TOOL_STEPS ? FOLDER_TOOLS : undefined;
+  const codeOn = body.code === true;
+  const offered = [...(codeOn ? CODE_TOOLS : []), ...(folderName ? FOLDER_TOOLS : [])];
+  const tools = offered.length && stepsUsed < MAX_TOOL_STEPS ? offered : undefined;
   const runTurns = run ? stepTurns(run.steps) : [];
   const runTokens = runTurns.reduce((n, t) => n + estimateTokens(t.content + JSON.stringify(t.toolCalls ?? t.toolResults ?? "")), 0);
-  const folderText = folderName ? folderPrompt(folderName, MAX_TOOL_STEPS - stepsUsed) : "";
+  const folderText = [codeOn && tools ? codePrompt(material.dataFiles) : "", folderName ? folderPrompt(folderName, MAX_TOOL_STEPS - stepsUsed) : ""].filter(Boolean).join("\n\n");
   const baseTokens = estimateTokens(systemPrompt(promptBase) + folderText) + imageCount * IMAGE_TOKENS + material.visualTokens + runTokens + (tools ? 1500 : 0);
   const ctx = buildContext(history, model.contextTokens - baseTokens - SUMMARY_TOKENS);
 
