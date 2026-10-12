@@ -359,3 +359,57 @@ describe("quiz progress", () => {
     expect(state.fake!.db.conversations[0].quiz_state).toMatchObject({ asked: 2, correct: 1 });
   });
 });
+
+describe("web search", () => {
+  const tavily = (results: object[]) => vi.fn(async () => new Response(JSON.stringify({ results }), { status: 200 }));
+  const page = { title: "Bank of Canada rate", url: "https://www.bankofcanada.ca/rates/", content: "The policy rate is 2.25%.", published_date: "2026-10-01" };
+
+  it("searches once, charges it, cites [W#] with links, and reuses the results for follow-ups and other models", async () => {
+    state.live = true;
+    vi.stubEnv("TAVILY_API_KEY", "tvly-test");
+    const fetchMock = tavily([page]);
+    vi.stubGlobal("fetch", fetchMock);
+    state.events = [{ delta: "It's 2.25% [W1] [W4]." }, { usage: { input: 10, output: 5, reasoning: 0, cached: 0 } }];
+    const first = await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "What is the Bank of Canada policy rate now?", web: true })));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(budget.reserve).toHaveBeenCalledWith("user-1", expect.any(String), "web-search", "text", 8000);
+    expect(budget.settle).toHaveBeenCalledWith(expect.any(String), "settled", 8000);
+    expect(state.lastArgs!.system).toContain("[W1] Bank of Canada rate — https://www.bankofcanada.ca/rates/");
+    const done = first.at(-1);
+    expect(done.sources).toEqual([expect.objectContaining({ kind: "web", n: 1, url: "https://www.bankofcanada.ca/rates/", label: "bankofcanada.ca — Bank of Canada rate" })]);
+    expect(state.fake!.db.messages.find((m) => m.role === "assistant")!.content).toBe("It's 2.25% [W1]."); // made-up [W4] removed
+    expect(state.fake!.db.messages.find((m) => m.role === "user")!.web_results).toMatchObject({ results: [{ url: page.url }] });
+
+    // Follow-up on another model, web toggle off: same results, no new search or charge.
+    vi.mocked(budget.reserve).mockClear();
+    state.events = [{ delta: "Since [W1]." }, { usage: { input: 10, output: 5, reasoning: 0, cached: 0 } }];
+    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-opus", content: "since when?", conversationId: first[0].conversationId })));
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    expect(state.lastArgs!.system).toContain("[W1] Bank of Canada rate");
+    expect(vi.mocked(budget.reserve).mock.calls.some((c) => c[2] === "web-search")).toBe(false);
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it("a failed search isn't charged and the model is told", async () => {
+    state.live = true;
+    vi.stubEnv("TAVILY_API_KEY", "tvly-test");
+    vi.stubGlobal("fetch", vi.fn(async () => new Response("no", { status: 500 })));
+    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "latest news on X", web: true })));
+    expect(budget.settle).toHaveBeenCalledWith(expect.any(String), "released", 0, undefined, "search_failed");
+    expect(state.lastArgs!.system).toContain("The web search failed this time");
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+
+  it("is off when 'only my course material' is on", async () => {
+    state.live = true;
+    vi.stubEnv("TAVILY_API_KEY", "tvly-test");
+    const fetchMock = tavily([page]);
+    vi.stubGlobal("fetch", fetchMock);
+    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "rate?", web: true, courseOnly: true })));
+    expect(fetchMock).not.toHaveBeenCalled();
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+  });
+});

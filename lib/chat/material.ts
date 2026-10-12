@@ -8,7 +8,10 @@ import { estimateTokens } from "./context";
 // Visual material is never silently skipped: PDF pages that are scanned or carry a diagram are sent as a small PDF of
 // just those pages (apps with PDF_INPUT), and anything that can't be shown is named in `notes` for the model.
 
-export type Source = { n: number; fileId: string; fileName: string; page: number | null; label: string; excerpt: string };
+// kind "web" = a web search result, cited as [W#] (url set); otherwise a course-file passage, cited as [S#].
+export type Source = { n: number; fileId: string; fileName: string; page: number | null; label: string; excerpt: string; kind?: "web"; url?: string };
+
+const tag = (s: Pick<Source, "kind" | "n">) => `${s.kind === "web" ? "W" : "S"}${s.n}`;
 type FileRow = {
   id: string; name: string; kind: string; status: string; char_count: number | null; page_count: number | null;
   project_id: string | null; conversation_id: string | null; storage_path: string; mime: string;
@@ -313,14 +316,14 @@ export async function loadImages(supabase: SupabaseClient, attachmentIdsByMessag
 
 /** Which [S#] markers the answer actually cites — only those are shown as references. */
 export function citedSources(answer: string, sources: Source[]): Source[] {
-  const cited = new Set([...answer.matchAll(/\[S(\d+)\]/g)].map((m) => Number(m[1])));
-  return sources.filter((s) => cited.has(s.n));
+  const cited = new Set([...answer.matchAll(/\[([SW])(\d+)\]/g)].map((m) => `${m[1]}${m[2]}`));
+  return sources.filter((s) => cited.has(tag(s)));
 }
 
 /** Remove [S#] markers that don't match a passage we actually sent (made-up citations), so they're never shown. */
 export function stripInventedCitations(answer: string, sources: Source[]): string {
-  const real = new Set(sources.map((s) => s.n));
-  return answer.replace(/ ?\[S(\d+)\]/g, (m, n) => (real.has(Number(n)) ? m : ""));
+  const real = new Set(sources.map(tag));
+  return answer.replace(/ ?\[([SW])(\d+)\]/g, (m, k, n) => (real.has(`${k}${n}`) ? m : ""));
 }
 
 /**

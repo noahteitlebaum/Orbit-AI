@@ -38,7 +38,7 @@ type Message = {
   toolLog?: ToolLogEntry[]; // saved file actions, as loaded from the server
 };
 type Pending = { key: string; file?: UploadedFile; name: string; uploading: boolean; error?: string };
-type ChatSettings = { mode: StudyMode; courseOnly: boolean; summarized?: boolean; quiz?: QuizState | null };
+type ChatSettings = { mode: StudyMode; courseOnly: boolean; web?: boolean; summarized?: boolean; quiz?: QuizState | null };
 type ConvSummary = { id: string; title: string; modelId: string; projectId: string | null; updatedAt: string };
 type Project = { id: string; name: string; instructions: string };
 type Usage = { live: boolean; liveProviders?: ProviderId[]; allowance: number; spent: number; reserved: number; typical?: Record<string, number> };
@@ -420,7 +420,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       }
     }
 
-    const common = { provider, modelId, mode: chatSettings.mode, courseOnly: chatSettings.courseOnly, folder: link ? { name: link.name } : undefined };
+    const common = { provider, modelId, mode: chatSettings.mode, courseOnly: chatSettings.courseOnly, web: Boolean(chatSettings.web), folder: link ? { name: link.name } : undefined };
     let body: object = { ...common, content, retry, attachmentIds, conversationId: convId, projectId: active ? undefined : filter };
     const steps: Step[] = [];
     try {
@@ -696,7 +696,8 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       onUpload={() => fileInput.current?.click()}
       imageLabel={imageModel?.label ?? null} imageMode={imageMode} onImageMode={setImageMode}
       mode={chatSettings.mode} onMode={(m) => setChatSettings({ mode: m })}
-      courseOnly={chatSettings.courseOnly} onCourseOnly={(v) => setChatSettings({ courseOnly: v })}
+      courseOnly={chatSettings.courseOnly} onCourseOnly={(v) => setChatSettings({ courseOnly: v, ...(v ? { web: false } : {}) })}
+      web={Boolean(chatSettings.web)} onWeb={(v) => setChatSettings({ web: v, ...(v ? { courseOnly: false } : {}) })}
       folderName={folder?.name ?? null} folderOffline={Boolean(folder) && !folderOnline}
       onFolder={FOLDER_ACCESS[provider] ? () => setFolderDialog(true) : undefined}
       disabled={busy}

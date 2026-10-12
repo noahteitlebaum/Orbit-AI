@@ -74,7 +74,8 @@ export function systemPrompt(o: {
   courseOnly?: boolean;
   hasFiles?: boolean;
   unreadable?: string[];
-  notes?: string[];         // visual material that wasn't shown (lib/chat/material.ts)
+  notes?: string[];
+  web?: string;             // numbered web search results [W#] (lib/search/web.ts)         // visual material that wasn't shown (lib/chat/material.ts)
   summary?: string | null;  // summary of earlier messages that no longer fit
 }): string {
   const parts = [`${BASE_SYSTEM_PROMPT}\nYou are ${o.modelLabel}.`];
@@ -104,6 +105,15 @@ export function systemPrompt(o: {
     parts.push("The student turned on \"Only use my course material\", but nothing in their files matched this question. Say \"I couldn't find this in your course files\" and suggest what to upload or how to rephrase. Don't answer from general knowledge.");
   } else if (o.courseOnly) {
     parts.push("The student turned on \"Only use my course material\", but this chat has no course files yet. Say so, and suggest attaching the lecture slides or readings (or adding them to the course). Don't answer from general knowledge.");
+  }
+  if (o.web) {
+    parts.push(
+      "Web search results are below, numbered [W1], [W2]…. When you use one, cite it right after the claim as [W1] etc. " +
+        "Keep web and course material apart: course passages are [S#], web results are [W#]; if they disagree, say so and say which is " +
+        "the student's course material. Only cite results you actually used; never invent links or sources. Prefer recent, reliable sources, " +
+        "and mention when information may be out of date.",
+    );
+    parts.push(`<web_results>\n${o.web}\n</web_results>`);
   }
   return parts.join("\n\n");
 }

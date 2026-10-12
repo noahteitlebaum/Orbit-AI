@@ -5,6 +5,8 @@ import { isProviderDisabled, overRateLimit, reserve, settle } from "@/lib/billin
 import { buildContext, costMicros, estimateTokens, maxOutputFor, reservationMicros, STUDY_MODES, systemPrompt, type StudyMode } from "@/lib/chat/context";
 import { citedSources, gatherMaterial, grounding, IMAGE_TOKENS, loadImages, MAX_IMAGES, stripInventedCitations, type Source } from "@/lib/chat/material";
 import { SUMMARY_TOKENS, updateSummary } from "@/lib/chat/summary";
+import { WEB_SEARCH } from "@/config/search";
+import { domainOf, searchKey, searchQuery, webSearch, type WebResult } from "@/lib/search/web";
 import { applyResults, mergeQuiz, parseQuiz, quizContext, type QuizState } from "@/lib/chat/quiz";
 import { ADAPTERS, apiKeyFor, liveFor } from "@/lib/providers";
 import { ProviderError, type ChatTurn, type StreamEvent, type ToolCall, type Usage } from "@/lib/providers/types";
@@ -21,7 +23,7 @@ export const maxDuration = 300;
 
 type Body = {
   provider?: unknown; modelId?: unknown; content?: unknown; conversationId?: unknown; projectId?: unknown; retry?: unknown;
-  attachmentIds?: unknown; mode?: unknown; courseOnly?: unknown; folder?: unknown; run?: unknown;
+  attachmentIds?: unknown; mode?: unknown; courseOnly?: unknown; folder?: unknown; run?: unknown; web?: unknown;
 };
 type Row = { id: string; seq: number; role: "user" | "assistant"; content: string; status: string; kind: string; attachment_ids: string[] | null; model_id: string | null };
 
@@ -155,6 +157,54 @@ export async function POST(request: Request): Promise<Response> {
     if (await overRateLimit(user.id)) return json({ error: "rate_limited", conversationId: conversation.id }, 429);
   }
 
+  // ---- web search ("Search the web" on, not with "only my course material"). One search per question, charged like
+  // any call, saved on the question so later turns and other models use the same results. web_results: migration 0007.
+  type SavedSearch = { query: string; results: WebResult[]; at: string };
+  let web: SavedSearch | null = null;
+  const webNotes: string[] = [];
+  const wantsWeb = body.web === true && !conversation.course_only;
+  {
+    const { data: saved, error: savedErr } = await supabase.from("messages").select("id, seq, role, web_results").eq("conversation_id", conversation.id).order("seq");
+    if (!savedErr) {
+      const asked = (saved ?? []).filter((m) => m.role === "user");
+      const mine = asked.find((m) => m.id === userMessageId);
+      // This question's search (a retry or a tool round), else the latest from the last two questions (a follow-up).
+      const recent = asked.slice(-3).reverse().find((m) => m.web_results);
+      web = ((mine?.web_results ?? (!wantsWeb ? recent?.web_results : null)) as SavedSearch | null) ?? null;
+    }
+  }
+  if (wantsWeb && !web) {
+    const key = searchKey();
+    if (!live) webNotes.push("The student asked to search the web, but Orbit AI is in demo mode, so no search ran. Say so in one sentence.");
+    else if (!key) webNotes.push("The student asked to search the web, but web search isn't set up yet (no search key). Say so in one sentence and answer from what you know, clearly marked as not from a search.");
+    else {
+      const previousQ = rows.filter((m) => m.role === "user").at(-2)?.content;
+      const query = searchQuery(question, previousQ);
+      const searchId = randomUUID();
+      const cost = Math.ceil(WEB_SEARCH.pricePerSearch * 1_000_000);
+      const r = await reserve(user.id, searchId, "web-search", "text", cost);
+      if (!r.ok) return json({ error: r.reason === "budget" ? "budget" : r.reason === "global_stop" ? "paused" : "reserve_failed", conversationId: conversation.id }, r.reason === "budget" ? 402 : 503);
+      try {
+        const results = await webSearch(query, key);
+        await settle(searchId, "settled", cost);
+        web = { query, results, at: new Date().toISOString() };
+        await supabase.from("messages").update({ web_results: web }).eq("id", userMessageId);
+        if (!results.length) webNotes.push(`A web search for "${query}" found nothing. Say so, and answer from what you know, clearly marked as not from a search.`);
+      } catch {
+        await settle(searchId, "released", 0, undefined, "search_failed"); // a failed search isn't charged
+        webNotes.push("The web search failed this time. Say so in one sentence, and answer from what you know, clearly marked as not from a search.");
+      }
+    }
+  }
+  const webSources: Source[] = (web?.results ?? []).map((w, i) => ({
+    n: i + 1, kind: "web", url: w.url, fileId: "", fileName: domainOf(w.url), page: null,
+    label: `${domainOf(w.url)} — ${w.title}`, excerpt: w.content.slice(0, 600),
+  }));
+  const webBlock = web && webSources.length
+    ? `Web search results for "${web.query}" (searched ${web.at.slice(0, 10)}):\n` + (web.results.map((w, i) => `[W${i + 1}] ${w.title} — ${w.url}${w.published ? ` (published ${w.published.slice(0, 10)})` : ""}\n${w.content}`).join("\n\n"))
+    : "";
+  const allSources = [...material.sources, ...webSources];
+
   // ---- quiz progress (this chat + earlier quizzes in the course). quiz_state comes with migration 0006.
   let quizState: QuizState | null = null;
   let quizText = "";
@@ -172,7 +222,7 @@ export async function POST(request: Request): Promise<Response> {
   const promptBase = {
     modelLabel: model.label, projectName: project?.name, projectInstructions: project?.instructions,
     mode: conversation.mode as StudyMode, quiz: quizText, material: material.block, courseOnly: conversation.course_only,
-    hasFiles: material.hasFiles, unreadable: material.unreadable, notes: material.notes,
+    hasFiles: material.hasFiles, unreadable: material.unreadable, notes: [...material.notes, ...webNotes], web: webBlock,
   };
   const stepsUsed = run?.steps.length ?? 0;
   const tools = folderName && stepsUsed < MAX_TOOL_STEPS ? FOLDER_TOOLS : undefined;
@@ -281,7 +331,7 @@ export async function POST(request: Request): Promise<Response> {
       try {
         const events = live
           ? ADAPTERS[provider].stream({ model, system, history: turns, maxOutput, apiKey: apiKey!, signal: AbortSignal.timeout(240_000), tools })
-          : mockStream(model.label, history, ctx.dropped, material.sources, conversation.mode);
+          : mockStream(model.label, history, ctx.dropped, allSources, conversation.mode);
         for await (const ev of events) {
           if (ev.delta) {
             // Later rounds of a tool run continue the same reply, as a new paragraph.
@@ -306,9 +356,9 @@ export async function POST(request: Request): Promise<Response> {
       // References only point at passages that were really sent: made-up [S#] markers are removed from the saved text.
       // Quiz results: the server keeps the score; the marker lines are removed from the saved answer.
       const quiz = conversation.mode === "quiz" ? parseQuiz(finalText) : null;
-      const savedText = stripInventedCitations(quiz ? quiz.clean : finalText, material.sources);
-      const sources = citedSources(savedText, material.sources);
-      const ground = grounding(material.sources, sources);
+      const savedText = stripInventedCitations(quiz ? quiz.clean : finalText, allSources);
+      const sources = citedSources(savedText, allSources);
+      const ground = grounding(allSources, sources);
       await supabase.from("messages").update({ content: savedText, status, sources: ground === "none" ? null : sources }).eq("id", replyId);
       await supabase.from("conversations").update({ updated_at: new Date().toISOString() }).eq("id", conversation.id);
       if (quiz?.results.length && !failure) {

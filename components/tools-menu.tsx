@@ -20,6 +20,8 @@ export function ToolsMenu(p: {
   onMode: (m: StudyMode) => void;
   courseOnly: boolean;
   onCourseOnly: (on: boolean) => void;
+  web?: boolean;               // search the web for this chat's questions
+  onWeb?: (on: boolean) => void;
   folderName?: string | null; // connected folder
   folderOffline?: boolean;    // remembered folder, but the browser wants permission again
   onFolder?: () => void;      // open the connect / folder dialog; omitted = this app has no folder access
@@ -63,6 +65,7 @@ export function ToolsMenu(p: {
       {p.imageMode && <Chip onClear={() => p.onImageMode(false)} label="Image" icon={<ImageIcon />} />}
       {p.mode !== "chat" && <Chip onClear={() => p.onMode("chat")} label={MODE_LABELS[p.mode].label} icon={<CapIcon />} />}
       {p.courseOnly && <Chip onClear={() => p.onCourseOnly(false)} label="My files only" icon={<BookIcon />} />}
+      {p.web && p.onWeb && <Chip onClear={() => p.onWeb!(false)} label="Web" icon={<GlobeIcon />} />}
 
       {open && (
         <div role="menu" className="model-menu absolute bottom-full left-0 z-40 mb-2 w-80 origin-bottom-left rounded-2xl border border-line bg-composer p-1.5 shadow-menu">
@@ -90,6 +93,17 @@ export function ToolsMenu(p: {
               <span className="block truncate text-xs text-ink-subtle">{p.imageLabel ?? "Not available in this app"}</span>
             </span>
           </button>
+          {p.onWeb && (
+            <button type="button" role="menuitemcheckbox" aria-checked={Boolean(p.web)} className={item}
+              onClick={() => { p.onWeb!(!p.web); setOpen(false); }}>
+              <span className={icon}><GlobeIcon /></span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-medium">Search the web</span>
+                <span className="block truncate text-xs text-ink-subtle">Current info with links · about 1¢ per search</span>
+              </span>
+              <Toggle on={Boolean(p.web)} />
+            </button>
+          )}
           <button type="button" role="menuitemcheckbox" aria-checked={p.courseOnly} className={item}
             onClick={() => { p.onCourseOnly(!p.courseOnly); setOpen(false); }}>
             <span className={icon}><BookIcon /></span>
@@ -168,6 +182,14 @@ function FolderIcon() {
   return (
     <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden>
       <path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h2.6l1.5 1.5h4.9A1.5 1.5 0 0 1 14 6v5.5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+    </svg>
+  );
+}
+function GlobeIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden>
+      <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="1.3" />
+      <path d="M2 8h12M8 2c1.8 1.7 2.6 3.7 2.6 6S9.8 12.3 8 14C6.2 12.3 5.4 10.3 5.4 8S6.2 3.7 8 2z" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
     </svg>
   );
 }
