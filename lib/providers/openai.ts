@@ -72,7 +72,7 @@ export const openai: ProviderAdapter = {
     const res = await fetch("https://api.openai.com/v1/images/generations", {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: model.apiModel, prompt, n: 1, size: "1024x1024" }),
+      body: JSON.stringify({ model: model.apiModel, prompt, n: 1, size: "1024x1024", quality: "medium" }), // medium keeps the flat price honest
       signal,
     });
     if (!res.ok) throw errorForStatus(res.status);

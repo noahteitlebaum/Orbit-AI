@@ -81,8 +81,10 @@ export interface ImageModel {
 }
 
 export const IMAGE_MODELS: Record<ProviderId, ImageModel | null> = {
-  // OpenAI prices images by quality/size via a calculator — set pricePerImage from developers.openai.com/api/docs/pricing.
-  openai: { provider: "openai", label: "GPT Image 2.5", apiModel: "gpt-image-2.5-flare", pricePerImage: null },
+  // OpenAI bills images as tokens: gpt-image-2.5-flare $30 / 1M image-output tokens (developers.openai.com/api/docs/pricing,
+  // checked Oct 12 2026). We ask for quality "medium" at 1024×1024 (~1,056 output tokens ≈ $0.032) and charge a flat $0.04
+  // to cover the prompt and rounding. Re-check before launch.
+  openai: { provider: "openai", label: "GPT Image 2.5", apiModel: "gpt-image-2.5-flare", pricePerImage: 0.04 },
   anthropic: null, // Claude doesn't generate images.
   google: { provider: "google", label: "Gemini 3.1 Flash Image", apiModel: "gemini-3.1-flash-image", pricePerImage: 0.07 },
   xai: { provider: "xai", label: "Grok Imagine", apiModel: "grok-imagine-image-2.0", pricePerImage: 0.04 },
