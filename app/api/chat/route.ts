@@ -18,15 +18,17 @@ import { parseSteps, stepTurns, toolLog, type Step } from "@/lib/folder/run";
 // POST /api/chat — auth → ownership → gates → context (+ course material, images, summary) → reserve → stream → reconcile → save.
 // Body: { provider, modelId, content, conversationId?, projectId?, retry?, attachmentIds?, mode?, courseOnly?, folder?, run? }
 //   folder: { name } — the student connected a folder in the browser, so the model gets file tools.
+//   voice: true — voice conversation: short, speakable answers (the browser reads them aloud).
 //   code: true — the browser can run Python (lib/code/runner.ts), so the model gets run_python.
 //   run: { replyId, steps } — continue a reply after the browser ran the model's tool calls (see lib/folder/run.ts).
 // Response: newline-delimited JSON events: meta, delta…, then done (with cited sources), tool_calls (browser runs
 // them, then calls again with run), or error.
 export const maxDuration = 300;
+const VOICE_MAX_OUTPUT = 1_200; // spoken answers are short; a smaller cap also means a smaller reservation
 
 type Body = {
   provider?: unknown; modelId?: unknown; content?: unknown; conversationId?: unknown; projectId?: unknown; retry?: unknown;
-  attachmentIds?: unknown; mode?: unknown; courseOnly?: unknown; folder?: unknown; run?: unknown; web?: unknown; code?: unknown;
+  attachmentIds?: unknown; mode?: unknown; courseOnly?: unknown; folder?: unknown; run?: unknown; web?: unknown; code?: unknown; voice?: unknown;
 };
 type Row = { id: string; seq: number; role: "user" | "assistant"; content: string; status: string; kind: string; attachment_ids: string[] | null; model_id: string | null };
 
@@ -123,6 +125,10 @@ export async function POST(request: Request): Promise<Response> {
     if (error || !data) return dbError(error, "save_failed");
     userMessageId = data.id;
   }
+
+  // Profile + memories load in parallel with the rest (they don't depend on it).
+  const personalP = loadPersonal(supabase);
+  const voice = body.voice === true; // voice conversation: quick, short, no tools
 
   // ---- history
   const { data: rawRows } = await supabase
@@ -223,19 +229,20 @@ export async function POST(request: Request): Promise<Response> {
   }
 
   // ---- the student's profile and saved memories (Settings; migration 0008)
-  const personal = await loadPersonal(supabase);
+  const personal = await personalP;
   const promptBase = {
     modelLabel: model.label, personal: personalPrompt(personal.profile, personal.memories), projectName: project?.name, projectInstructions: project?.instructions,
     mode: conversation.mode as StudyMode, quiz: quizText, material: material.block, courseOnly: conversation.course_only,
     hasFiles: material.hasFiles, unreadable: material.unreadable, notes: [...material.notes, ...webNotes], web: webBlock,
+    voice,
   };
   const stepsUsed = run?.steps.length ?? 0;
   const codeOn = body.code === true;
   const offered = [...(codeOn ? CODE_TOOLS : []), ...(folderName ? FOLDER_TOOLS : [])];
-  const tools = offered.length && stepsUsed < MAX_TOOL_STEPS ? offered : undefined;
+  const tools = offered.length && stepsUsed < MAX_TOOL_STEPS && !voice ? offered : undefined;
   const runTurns = run ? stepTurns(run.steps) : [];
   const runTokens = runTurns.reduce((n, t) => n + estimateTokens(t.content + JSON.stringify(t.toolCalls ?? t.toolResults ?? "")), 0);
-  const folderText = [codeOn && tools ? codePrompt(material.dataFiles) : "", folderName ? folderPrompt(folderName, MAX_TOOL_STEPS - stepsUsed) : ""].filter(Boolean).join("\n\n");
+  const folderText = [codeOn && tools ? codePrompt(material.dataFiles) : "", folderName && !voice ? folderPrompt(folderName, MAX_TOOL_STEPS - stepsUsed) : ""].filter(Boolean).join("\n\n");
   const baseTokens = estimateTokens(systemPrompt(promptBase) + folderText) + imageCount * IMAGE_TOKENS + material.visualTokens + runTokens + (tools ? 1500 : 0);
   const ctx = buildContext(history, model.contextTokens - baseTokens - SUMMARY_TOKENS);
 
@@ -279,7 +286,7 @@ export async function POST(request: Request): Promise<Response> {
   const inputTokens = ctx.tokens + runTokens + (tools ? 1500 : 0) + estimateTokens(system) + [...images.values()].flat().length * IMAGE_TOKENS + material.visualTokens;
 
   // ---- reservation (live only)
-  let maxOutput = model.maxOutputTokens;
+  let maxOutput = voice ? Math.min(model.maxOutputTokens, VOICE_MAX_OUTPUT) : model.maxOutputTokens;
   if (live) {
     let r = await reserve(user.id, requestId, model.id, "text", reservationMicros(model, inputTokens, maxOutput));
     if (!r.ok && r.reason === "budget" && r.remaining) {
@@ -337,7 +344,7 @@ export async function POST(request: Request): Promise<Response> {
       let failure: ProviderError | null = null;
       try {
         const events = live
-          ? ADAPTERS[provider].stream({ model, system, history: turns, maxOutput, apiKey: apiKey!, signal: AbortSignal.timeout(240_000), tools })
+          ? ADAPTERS[provider].stream({ model, system, history: turns, maxOutput, apiKey: apiKey!, signal: AbortSignal.timeout(240_000), tools, fast: voice })
           : mockStream(model.label, history, ctx.dropped, allSources, conversation.mode);
         for await (const ev of events) {
           if (ev.delta) {

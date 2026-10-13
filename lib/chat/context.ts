@@ -64,6 +64,14 @@ export const MODE_PROMPTS: Record<StudyMode, string> = {
     "to try the next step. Give a bigger hint only if they're still stuck after trying. Confirm when their own answer is correct.",
 };
 
+/** Voice conversation (components/voice-mode.tsx): the reply is spoken aloud by the browser. */
+export const VOICE_PROMPT =
+  "This is a spoken conversation: the student is talking to you and your reply will be read aloud. Answer like a friendly tutor talking: " +
+  "short (usually 2 to 4 sentences), then offer to go deeper or ask a quick check question. No Markdown, bullet lists, tables, headings, " +
+  "code blocks, emojis or LaTeX; say math in words (\"x squared over two\"). If something really needs to be seen (code, a long table, a diagram), " +
+  "say you'll put it in the chat and keep the spoken part brief. Their words came from speech-to-text, so if something sounds misheard, " +
+  "ask rather than guess. Keep [S#]/[W#] citations, but don't read file names or links aloud.";
+
 export function systemPrompt(o: {
   modelLabel: string;
   personal?: string;        // the student's profile and saved memories (lib/profile/personal.ts)
@@ -78,6 +86,7 @@ export function systemPrompt(o: {
   notes?: string[];
   web?: string;             // numbered web search results [W#] (lib/search/web.ts)         // visual material that wasn't shown (lib/chat/material.ts)
   summary?: string | null;  // summary of earlier messages that no longer fit
+  voice?: boolean;          // voice conversation: the answer is read aloud
 }): string {
   const parts = [`${BASE_SYSTEM_PROMPT}\nYou are ${o.modelLabel}.`];
   if (o.personal) parts.push(o.personal);
@@ -108,6 +117,7 @@ export function systemPrompt(o: {
   } else if (o.courseOnly) {
     parts.push("The student turned on \"Only use my course material\", but this chat has no course files yet. Say so, and suggest attaching the lecture slides or readings (or adding them to the course). Don't answer from general knowledge.");
   }
+  if (o.voice) parts.push(VOICE_PROMPT);
   if (o.web) {
     parts.push(
       "Web search results are below, numbered [W1], [W2]…. When you use one, cite it right after the claim as [W1] etc. " +

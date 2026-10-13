@@ -347,6 +347,16 @@ describe("profile and memory", () => {
   });
 });
 
+describe("voice conversation", () => {
+  it("asks for short, speakable answers only when the message came by voice", async () => {
+    state.live = true;
+    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "hi" })));
+    expect(state.lastArgs!.system).not.toContain("spoken conversation");
+    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "what is a standard deviation", voice: true })));
+    expect(state.lastArgs!.system).toContain("This is a spoken conversation");
+  });
+});
+
 describe("persistent chats and model switching", () => {
   async function ask(body: Record<string, unknown>) {
     return readEvents(await POST(req({ provider: "anthropic", ...body })));

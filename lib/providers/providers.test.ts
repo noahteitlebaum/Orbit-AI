@@ -211,3 +211,29 @@ describe("folder tools", () => {
     expect(out).toHaveLength(3);
   });
 });
+
+describe("voice: think less so replies start sooner", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  const done = () => sseResponse([`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "ok" })}`]);
+  const bodyOf = (m: ReturnType<typeof vi.fn>, i: number) => JSON.parse((m.mock.calls[i] as unknown as [string, RequestInit])[1].body as string);
+
+  it("openai asks for low reasoning effort, and asks normally if the model doesn't support it", async () => {
+    let fetchMock = vi.fn(async () => done());
+    vi.stubGlobal("fetch", fetchMock);
+    await collect(openai.stream({ ...args(), fast: true }));
+    expect(bodyOf(fetchMock, 0).reasoning).toEqual({ effort: "low" });
+    fetchMock = vi.fn().mockResolvedValueOnce(new Response("bad", { status: 400 })).mockResolvedValueOnce(done());
+    vi.stubGlobal("fetch", fetchMock);
+    expect((await collect(openai.stream({ ...args(), fast: true }))).text).toBe("ok");
+    expect(bodyOf(fetchMock, 1).reasoning).toBeUndefined();
+  });
+
+  it("gemini asks for low thinking", async () => {
+    const fetchMock = vi.fn(async () => sseResponse([`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }] })}`]));
+    vi.stubGlobal("fetch", fetchMock);
+    await collect(google.stream({ ...args(), fast: true }));
+    expect(bodyOf(fetchMock, 0).generationConfig.thinkingConfig).toEqual({ thinkingLevel: "low" });
+    await collect(google.stream(args()));
+    expect(bodyOf(fetchMock, 1).generationConfig.thinkingConfig).toBeUndefined();
+  });
+});

@@ -36,18 +36,20 @@ function toContent(t: ChatTurn) {
 export const google: ProviderAdapter = {
   id: "google",
 
-  async *stream({ model, system, history, maxOutput, apiKey, signal, tools }) {
-    const res = await fetch(`${BASE}/${encodeURIComponent(model.apiModel)}:streamGenerateContent?alt=sse`, {
+  async *stream({ model, system, history, maxOutput, apiKey, signal, tools, fast }) {
+    const call = (lowThinking: boolean) => fetch(`${BASE}/${encodeURIComponent(model.apiModel)}:streamGenerateContent?alt=sse`, {
       method: "POST",
       headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: system }] },
         contents: normalizeTurns(history).map(toContent),
         ...(tools?.length ? { tools: [{ functionDeclarations: tools.map(toolSchema) }] } : {}),
-        generationConfig: { maxOutputTokens: maxOutput },
+        generationConfig: { maxOutputTokens: maxOutput, ...(lowThinking ? { thinkingConfig: { thinkingLevel: "low" } } : {}) },
       }),
       signal,
     });
+    let res = await call(Boolean(fast));
+    if (fast && res.status === 400) res = await call(false); // a model without thinking settings: ask normally
     if (!res.ok || !res.body) throw errorForStatus(res.status);
 
     let usage: { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number; cachedContentTokenCount?: number } | undefined;

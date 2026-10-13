@@ -43,13 +43,15 @@ export async function isProviderDisabled(provider: ProviderId): Promise<boolean>
   return Array.isArray(data?.value) && (data.value as string[]).includes(provider);
 }
 
-/** Simple per-user rate limit: at most `max` model calls per minute. */
+/** Simple per-user rate limit: at most `max` model calls per minute. Spoken-reply audio isn't counted (a voice
+ *  answer is read out in a few pieces, each billed separately). */
 export async function overRateLimit(userId: string, max = 12): Promise<boolean> {
   const since = new Date(Date.now() - 60_000).toISOString();
   const { count } = await createAdminClient()
     .from("ledger")
     .select("id", { count: "exact", head: true })
     .eq("user_id", userId)
+    .neq("model_id", "voice-speak")
     .gte("created_at", since);
   return (count ?? 0) >= max;
 }

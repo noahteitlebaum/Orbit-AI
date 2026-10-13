@@ -36,6 +36,7 @@ export interface StreamArgs {
   apiKey: string;
   signal: AbortSignal;
   tools?: ToolDef[]; // folder tools, when the student connected a folder
+  fast?: boolean;    // voice conversations: think as little as possible so the reply starts sooner
 }
 
 export interface ImageArgs {

@@ -23,11 +23,12 @@ function toInput(t: ChatTurn): object[] {
 export const openai: ProviderAdapter = {
   id: "openai",
 
-  async *stream({ model, system, history, maxOutput, apiKey, signal, tools }) {
-    const res = await fetch("https://api.openai.com/v1/responses", {
+  async *stream({ model, system, history, maxOutput, apiKey, signal, tools, fast }) {
+    const call = (lowEffort: boolean) => fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
+        ...(lowEffort ? { reasoning: { effort: "low" } } : {}),
         model: model.apiModel,
         instructions: system,
         input: normalizeTurns(history).flatMap(toInput),
@@ -38,6 +39,8 @@ export const openai: ProviderAdapter = {
       }),
       signal,
     });
+    let res = await call(Boolean(fast));
+    if (fast && res.status === 400) res = await call(false); // a model without reasoning settings: ask normally
     if (!res.ok || !res.body) throw errorForStatus(res.status);
 
     for await (const { data } of readSse(res.body)) {

@@ -19,6 +19,9 @@ import { FolderDialog } from "@/components/folder-dialog";
 import { ExportMenu, type ExportOption } from "@/components/export-menu";
 import { SettingsDialog, type SettingsTab } from "@/components/settings-dialog";
 import { AccountMenu } from "@/components/account-menu";
+import { VoiceButton } from "@/components/voice-button";
+import { SpeakButton } from "@/components/speak-button";
+import { VoiceMode } from "@/components/voice-mode";
 import { answerMarkdown, chatMarkdown, cleanAnswer, fileSlug, markdownTables, saveFile, toCsv, toPlainText, type ExportMessage } from "@/lib/export/export";
 import { FolderActivity, previewFor, type Activity } from "@/components/folder-activity";
 import { loadApprovalMode, loadFolder, permission, runFolderTool, saveApprovalMode, saveFolder, type ApprovalMode, type FolderLink } from "@/lib/folder/browser-fs";
@@ -117,6 +120,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
   const [folderOnline, setFolderOnline] = useState(false); // false = the browser wants permission again
   const [folderDialog, setFolderDialog] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState<SettingsTab | null>(null);
+  const [voiceOpen, setVoiceOpen] = useState(false); // voice conversation screen
   const [memoryVersion, setMemoryVersion] = useState(0);
   const [codeOk, setCodeOk] = useState(false); // this browser can run Python (known only after mount)
   useEffect(() => {
@@ -434,8 +438,20 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     setTimeout(() => setNotice((n) => (n === text ? null : n)), 6000);
   }
 
+  // Voice conversations send through the latest send() once any earlier reply has finished.
+  const busyRef = useRef(false);
+  const sendRef = useRef(send);
+  useEffect(() => {
+    busyRef.current = busy;
+    sendRef.current = send;
+  });
+  const sendByVoice = useCallback(async (text: string) => {
+    for (let i = 0; busyRef.current && i < 100; i++) await new Promise((r) => setTimeout(r, 100));
+    await sendRef.current(text, false, { voice: true });
+  }, []);
+
   // ---------------------------------------------------------------- sending
-  async function send(text: string, retry = false) {
+  async function send(text: string, retry = false, opts: { voice?: boolean } = {}) {
     const content = text.trim();
     const ready = pending.filter((p) => p.file);
     if ((!content && !retry && !ready.length) || busy || pending.some((p) => p.uploading)) return;
@@ -485,7 +501,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       if (f.status !== "failed" && DATA_FILE.test(f.name)) dataFiles.set(f.id, f.name);
     }
     const code = codeSupported();
-    const common = { provider, modelId, mode: chatSettings.mode, courseOnly: chatSettings.courseOnly, web: Boolean(chatSettings.web), code, folder: link ? { name: link.name } : undefined };
+    const common = { provider, modelId, mode: chatSettings.mode, courseOnly: chatSettings.courseOnly, web: Boolean(chatSettings.web), code, voice: opts.voice || undefined, folder: link ? { name: link.name } : undefined };
     let body: object = { ...common, content, retry, attachmentIds, conversationId: convId, projectId: active ? undefined : filter };
     const steps: Step[] = [];
     const dataCache = new Map<string, RunFile>(); // data files downloaded once per reply
@@ -803,6 +819,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
   const placeholder = imageMode ? "Describe an image" : empty ? `Ask ${theme.appName}` : `Reply to ${theme.appName}…`;
   const textarea = (
     <textarea
+      data-composer
       value={input}
       onChange={(e) => setInput(e.target.value)}
       onInput={(e) => { const t = e.currentTarget; t.style.height = "auto"; t.style.height = `${Math.min(t.scrollHeight, 160)}px`; }}
@@ -839,6 +856,29 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       ))}
     </div>
   );
+  const voice = imageMode ? null : (
+    <VoiceButton
+      disabled={busy}
+      hint={activeProject?.name}
+      onError={alertLine}
+      onText={(t) => {
+        setInput((prev) => (prev.trim() ? `${prev.trimEnd()} ${t}` : t));
+        requestAnimationFrame(() => {
+          const el = document.querySelector<HTMLTextAreaElement>("textarea[data-composer]");
+          if (!el) return;
+          el.focus();
+          el.style.height = "auto";
+          el.style.height = `${Math.min(el.scrollHeight, 160)}px`;
+        });
+      }}
+    />
+  );
+  const voiceChat = imageMode ? null : (
+    <button type="button" onClick={() => setVoiceOpen(true)} disabled={busy} aria-label="Voice conversation" title="Talk with the AI (voice conversation)"
+      className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-ink-muted transition hover:bg-surface-300 hover:text-ink disabled:opacity-40">
+      <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden><path d="M3 9v2M6.5 6.5v7M10 4v12M13.5 6.5v7M17 9v2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
+    </button>
+  );
   const modelMenu = imageMode ? null : <ModelMenu provider={provider} value={modelId} onChange={setModel} disabled={busy} />;
 
   const composer = (
@@ -856,6 +896,8 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
             {tools}
             {textarea}
             {modelMenu}
+            {voice}
+            {voiceChat}
             {sendButton}
           </div>
         </div>
@@ -867,6 +909,8 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
             {tools}
             <span className="flex-1" />
             {modelMenu}
+            {voice}
+            {voiceChat}
             {sendButton}
           </div>
         </div>
@@ -1182,8 +1226,9 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                           </p>
                         )}
                         {m.kind === "text" && (m.status === "complete" || m.status === "partial") && m.content.trim() && (
-                          <div className="mt-2 -ml-2.5">
+                          <div className="mt-2 -ml-2.5 flex items-center gap-1">
                             <ExportMenu options={answerOptions(m, idx)} />
+                            <SpeakButton id={m.id} text={cleanAnswer(m.content, m.sources)} />
                           </div>
                         )}
                         {m.kind === "text" && m.status === "complete" && /couldn.t find this in your course files/i.test(m.content) ? (
@@ -1232,6 +1277,21 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
           saveApprovalMode(m);
         }}
       />
+      {voiceOpen && (
+        <VoiceMode
+          open
+          onClose={() => setVoiceOpen(false)}
+          appName={theme.appName}
+          modelLabel={currentModel?.label}
+          reply={(() => {
+            const r = [...thread].reverse().find((m) => m.role === "assistant" && m.kind === "text");
+            return r ? { id: r.id, content: r.content, status: r.status, error: r.error } : null;
+          })()}
+          onSend={sendByVoice}
+          onStop={() => abortRef.current?.abort()}
+          hint={activeProject?.name}
+        />
+      )}
       <SettingsDialog
         open={settingsOpen !== null}
         tab={settingsOpen ?? undefined}
