@@ -16,6 +16,8 @@ import { FileChip } from "@/components/file-chip";
 import { AnswerText, SourceList, type Source } from "@/components/answer-text";
 import { ACCEPT_ATTR, fileNote, uploadFile, type UploadedFile } from "@/lib/files/upload-client";
 import { FolderDialog } from "@/components/folder-dialog";
+import { ExportMenu, type ExportOption } from "@/components/export-menu";
+import { answerMarkdown, chatMarkdown, cleanAnswer, fileSlug, markdownTables, saveFile, toCsv, toPlainText, type ExportMessage } from "@/lib/export/export";
 import { FolderActivity, previewFor, type Activity } from "@/components/folder-activity";
 import { loadApprovalMode, loadFolder, permission, runFolderTool, saveApprovalMode, saveFolder, type ApprovalMode, type FolderLink } from "@/lib/folder/browser-fs";
 import { describeCall, isFolderTool, isWriteTool } from "@/lib/folder/tools";
@@ -119,6 +121,37 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
   const modelId = getModel(active?.modelId)?.provider === provider ? active!.modelId : draftModels[provider];
   const currentModel = getModel(modelId);
   const empty = thread.length === 0;
+
+  // ---------------------------------------------------------------- downloads (Markdown, text, CSV)
+  const forExport = (m: Message): ExportMessage => ({
+    role: m.role, content: m.content, sources: m.sources, author: getModel(m.modelId)?.label,
+    attachments: m.attachments?.map((a) => a.name),
+    runs: m.activity?.filter((a) => a.name === "run_python").map((a) => ({ code: a.code, stdout: a.stdout, files: a.outputs?.map((f) => f.name) })),
+  });
+  function answerOptions(m: Message, index: number): ExportOption[] {
+    const question = [...thread.slice(0, index)].reverse().find((x) => x.role === "user")?.content ?? "";
+    const base = fileSlug(question || active?.title || "");
+    const md = answerMarkdown(forExport(m));
+    const tables = markdownTables(cleanAnswer(m.content, m.sources));
+    return [
+      { label: "Markdown (.md)", hint: "Keeps headings, equations and sources", run: () => saveFile(`${base}.md`, md, "text/markdown") },
+      { label: "Plain text (.txt)", run: () => saveFile(`${base}.txt`, toPlainText(md), "text/plain") },
+      ...tables.map((t, i) => ({
+        label: tables.length === 1 ? "Table as CSV (.csv)" : `Table ${i + 1} as CSV (.csv)`,
+        hint: `${t[0].slice(0, 3).join(", ")}${t[0].length > 3 ? "…" : ""} · ${t.length - 1} rows`,
+        run: () => saveFile(`${base}${tables.length > 1 ? `-table-${i + 1}` : ""}.csv`, toCsv(t), "text/csv"),
+      })),
+    ];
+  }
+  const exportable = thread.filter((m) => m.kind === "text" && m.status !== "error" && (m.content.trim() || m.activity?.length));
+  function chatOptions(): ExportOption[] {
+    const title = active?.title || "Chat";
+    const md = () => chatMarkdown(title, exportable.map(forExport));
+    return [
+      { label: "Whole chat as Markdown", hint: "Questions, answers, equations and sources", run: () => saveFile(`${fileSlug(title, "orbit-chat")}.md`, md(), "text/markdown") },
+      { label: "Whole chat as text", run: () => saveFile(`${fileSlug(title, "orbit-chat")}.txt`, toPlainText(md()), "text/plain") },
+    ];
+  }
   const chatSettings: ChatSettings = settings[msgKey] ?? { mode: "chat", courseOnly: false };
   const setChatSettings = (patch: Partial<ChatSettings>) => setSettings((prev) => ({ ...prev, [msgKey]: { ...chatSettings, ...patch } }));
   const activeProject = projects[provider].find((p) => p.id === (active?.projectId ?? filter)) ?? null;
@@ -987,7 +1020,12 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
               </select>
             </label>
           )}
-          <div className={`flex gap-1 md:hidden ${active && projects[provider].length > 0 ? "" : "ml-auto"}`} role="group" aria-label="AI apps">
+          {exportable.some((m) => m.role === "assistant") && (
+            <div className={active && projects[provider].length > 0 ? "" : "ml-auto"}>
+              <ExportMenu label="Export" options={chatOptions()} align="right" />
+            </div>
+          )}
+          <div className={`flex gap-1 md:hidden ${(active && projects[provider].length > 0) || exportable.some((m) => m.role === "assistant") ? "" : "ml-auto"}`} role="group" aria-label="AI apps">
             {PROVIDERS.map((p) => (
               <button key={p} onClick={() => pickProvider(p)} disabled={busy && p !== provider} aria-pressed={p === provider} aria-label={THEMES[p].appName}
                 className={`grid h-9 w-9 place-items-center rounded-xl ${p === provider ? "bg-surface-300" : ""}`}>
@@ -1095,6 +1133,11 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                         )}
                         {m.kind === "text" && m.sources && m.sources.length > 0 && (
                           <SourceList sources={m.sources} />
+                        )}
+                        {m.kind === "text" && (m.status === "complete" || m.status === "partial") && m.content.trim() && (
+                          <div className="mt-2 -ml-2.5">
+                            <ExportMenu options={answerOptions(m, idx)} />
+                          </div>
                         )}
                         {m.kind === "text" && m.status === "complete" && /couldn.t find this in your course files/i.test(m.content) ? (
                           <p className="mt-3 inline-flex rounded-full bg-surface-200 px-3 py-1 text-xs font-medium text-warning">Not found in your course files</p>
