@@ -237,3 +237,12 @@ describe("voice: think less so replies start sooner", () => {
     expect(bodyOf(fetchMock, 1).generationConfig.thinkingConfig).toBeUndefined();
   });
 });
+
+describe("key names", () => {
+  it("accepts CLAUDE_API_KEY for Claude and GOOGLE_API_KEY for Gemini", () => {
+    expect(apiKeyFor("anthropic", { CLAUDE_API_KEY: " sk-ant " })).toBe("sk-ant");
+    expect(apiKeyFor("anthropic", { ANTHROPIC_API_KEY: "a", CLAUDE_API_KEY: "b" })).toBe("a");
+    expect(apiKeyFor("google", { GOOGLE_API_KEY: "g" })).toBe("g");
+    expect(liveFor("anthropic", { LIVE_MODELS: "on", CLAUDE_API_KEY: "x" })).toBe(true);
+  });
+});
