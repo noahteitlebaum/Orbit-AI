@@ -2,6 +2,7 @@
 // Pure functions (tested in export.test.ts); the browser download itself is saveFile().
 import { citationParts, type Source } from "@/components/answer-text";
 import { hideQuizMarkers } from "@/lib/chat/quiz";
+import { hideRememberMarkers } from "@/lib/profile/personal";
 
 export type ExportRun = { code?: string; stdout?: string; files?: string[] };
 export type ExportMessage = { role: "user" | "assistant"; content: string; sources?: Source[]; author?: string; attachments?: string[]; runs?: ExportRun[] };
@@ -27,7 +28,7 @@ export function normalizeMath(md: string): string {
 
 /** The answer as saved: quiz markers removed, only real citations kept ([S1], [W2]). */
 export function cleanAnswer(text: string, sources: Source[] | undefined): string {
-  return citationParts(hideQuizMarkers(text), sources, true)
+  return citationParts(hideRememberMarkers(hideQuizMarkers(text)), sources, true)
     .map((p) => ("text" in p ? p.text : `[${p.web ? "W" : "S"}${p.n}]`))
     .join("")
     .replace(/[ \t]+\n/g, "\n")

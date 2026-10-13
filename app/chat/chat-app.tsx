@@ -17,6 +17,7 @@ import { AnswerText, SourceList, type Source } from "@/components/answer-text";
 import { ACCEPT_ATTR, fileNote, uploadFile, type UploadedFile } from "@/lib/files/upload-client";
 import { FolderDialog } from "@/components/folder-dialog";
 import { ExportMenu, type ExportOption } from "@/components/export-menu";
+import { SettingsDialog, type SettingsTab } from "@/components/settings-dialog";
 import { answerMarkdown, chatMarkdown, cleanAnswer, fileSlug, markdownTables, saveFile, toCsv, toPlainText, type ExportMessage } from "@/lib/export/export";
 import { FolderActivity, previewFor, type Activity } from "@/components/folder-activity";
 import { loadApprovalMode, loadFolder, permission, runFolderTool, saveApprovalMode, saveFolder, type ApprovalMode, type FolderLink } from "@/lib/folder/browser-fs";
@@ -40,6 +41,7 @@ type Message = {
   sources?: Source[];
   activity?: Activity[]; // file actions in the connected folder
   toolLog?: ToolLogEntry[]; // saved file actions, as loaded from the server
+  remembered?: string[]; // memories this answer saved (Settings → Memory)
 };
 type Pending = { key: string; file?: UploadedFile; name: string; uploading: boolean; error?: string };
 type ChatSettings = { mode: StudyMode; courseOnly: boolean; web?: boolean; summarized?: boolean; quiz?: QuizState | null };
@@ -99,6 +101,8 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
   const [folder, setFolder] = useState<FolderLink | null>(null); // folder the student connected (browser folder access)
   const [folderOnline, setFolderOnline] = useState(false); // false = the browser wants permission again
   const [folderDialog, setFolderDialog] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState<SettingsTab | null>(null);
+  const [memoryVersion, setMemoryVersion] = useState(0);
   const [codeOk, setCodeOk] = useState(false); // this browser can run Python (known only after mount)
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -516,8 +520,10 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
               // Same shape as a reloaded message: [] = files were searched but none used, undefined = no files involved.
               patchReply((m) => ({
                 ...m, status: ev.status === "partial" ? "partial" : "complete", sources: ev.grounding === "none" ? undefined : ev.sources,
-                ...(typeof ev.content === "string" ? { content: ev.content } : {}), // the saved text (quiz lines removed)
+                ...(typeof ev.content === "string" ? { content: ev.content } : {}), // the saved text (quiz/memory lines removed)
+                ...(Array.isArray(ev.remembered) && ev.remembered.length ? { remembered: ev.remembered.map((r: { content: string }) => r.content) } : {}),
               }));
+              if (Array.isArray(ev.remembered) && ev.remembered.length) setMemoryVersion((v) => v + 1);
               if (ev.quiz !== undefined) {
                 const cid = convId ?? currentKey;
                 setSettings((prev) => ({ ...prev, [cid]: { ...(prev[cid] ?? chatSettings), quiz: ev.quiz } }));
@@ -989,8 +995,13 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
               </ul>
             </details>
           )}
-          <p className="mt-3 truncate text-xs text-ink-subtle">{email}</p>
-          <form action={signOut}>
+          <button type="button" onClick={() => setSettingsOpen("profile")}
+            className="mt-3 flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left text-sm text-ink-muted hover:bg-surface-200 hover:text-ink">
+            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden className="shrink-0"><circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" strokeWidth="1.3" /><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M3.6 12.4l1.1-1.1M11.3 4.7l1.1-1.1" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /></svg>
+            Settings
+          </button>
+          <p className="mt-1 truncate px-2 text-xs text-ink-subtle">{email}</p>
+          <form action={signOut} className="px-2">
             <button className="mt-0.5 text-xs text-ink-subtle underline underline-offset-[3px] hover:text-ink-muted">Sign out</button>
           </form>
         </div>
@@ -1134,6 +1145,13 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                         {m.kind === "text" && m.sources && m.sources.length > 0 && (
                           <SourceList sources={m.sources} />
                         )}
+                        {m.remembered && m.remembered.length > 0 && (
+                          <p className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-subtle">
+                            <span className="rounded-full bg-surface-200 px-2.5 py-1 font-medium text-ink-muted">Memory updated</span>
+                            <span className="min-w-0">{m.remembered.join(" · ")}</span>
+                            <button type="button" onClick={() => setSettingsOpen("memory")} className="font-medium underline underline-offset-[3px] hover:text-ink">Manage</button>
+                          </p>
+                        )}
                         {m.kind === "text" && (m.status === "complete" || m.status === "partial") && m.content.trim() && (
                           <div className="mt-2 -ml-2.5">
                             <ExportMenu options={answerOptions(m, idx)} />
@@ -1183,6 +1201,20 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
         onApprovalMode={(m) => {
           setApprovalMode(m);
           saveApprovalMode(m);
+        }}
+      />
+      <SettingsDialog
+        open={settingsOpen !== null}
+        tab={settingsOpen ?? undefined}
+        onClose={() => setSettingsOpen(null)}
+        email={email}
+        appName={theme.appName}
+        courses={projects[provider]}
+        memoryVersion={memoryVersion}
+        onOpenCourse={(id) => {
+          const p = projects[provider].find((x) => x.id === id);
+          setSettingsOpen(null);
+          if (p) openCourse(p);
         }}
       />
       <ProjectDialog

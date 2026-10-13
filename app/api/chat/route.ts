@@ -12,6 +12,7 @@ import { ADAPTERS, apiKeyFor, liveFor } from "@/lib/providers";
 import { ProviderError, type ChatTurn, type StreamEvent, type ToolCall, type Usage } from "@/lib/providers/types";
 import { FOLDER_TOOLS, folderPrompt, MAX_CALLS_PER_STEP, MAX_TOOL_STEPS } from "@/lib/folder/tools";
 import { CODE_TOOLS, codePrompt } from "@/lib/code/tools";
+import { loadPersonal, parseRemember, personalPrompt, saveMemories, type Memory } from "@/lib/profile/personal";
 import { parseSteps, stepTurns, toolLog, type Step } from "@/lib/folder/run";
 
 // POST /api/chat — auth → ownership → gates → context (+ course material, images, summary) → reserve → stream → reconcile → save.
@@ -221,8 +222,10 @@ export async function POST(request: Request): Promise<Response> {
     quizText = quizContext(quizState, course);
   }
 
+  // ---- the student's profile and saved memories (Settings; migration 0008)
+  const personal = await loadPersonal(supabase);
   const promptBase = {
-    modelLabel: model.label, projectName: project?.name, projectInstructions: project?.instructions,
+    modelLabel: model.label, personal: personalPrompt(personal.profile, personal.memories), projectName: project?.name, projectInstructions: project?.instructions,
     mode: conversation.mode as StudyMode, quiz: quizText, material: material.block, courseOnly: conversation.course_only,
     hasFiles: material.hasFiles, unreadable: material.unreadable, notes: [...material.notes, ...webNotes], web: webBlock,
   };
@@ -359,8 +362,10 @@ export async function POST(request: Request): Promise<Response> {
       const status = failure ? "error" : stopped || wantsTools ? "partial" : "complete";
       // References only point at passages that were really sent: made-up [S#] markers are removed from the saved text.
       // Quiz results: the server keeps the score; the marker lines are removed from the saved answer.
-      const quiz = conversation.mode === "quiz" ? parseQuiz(finalText) : null;
-      const savedText = stripInventedCitations(quiz ? quiz.clean : finalText, allSources);
+      // Memories: [[remember: …]] lines are saved (only when the student turned memory on) and removed from the answer.
+      const remember = parseRemember(finalText);
+      const quiz = conversation.mode === "quiz" ? parseQuiz(remember.clean) : null;
+      const savedText = stripInventedCitations(quiz ? quiz.clean : remember.clean, allSources);
       const sources = citedSources(savedText, allSources);
       const ground = grounding(allSources, sources);
       await supabase.from("messages").update({ content: savedText, status, sources: ground === "none" ? null : sources }).eq("id", replyId);
@@ -368,6 +373,10 @@ export async function POST(request: Request): Promise<Response> {
       if (quiz?.results.length && !failure) {
         quizState = applyResults(quizState, quiz.results);
         await supabase.from("conversations").update({ quiz_state: quizState }).eq("id", conversation.id);
+      }
+      let remembered: Memory[] = [];
+      if (personal.profile?.memory_enabled && remember.saved.length && !failure) {
+        remembered = await saveMemories(supabase, user.id, conversation.id, personal.memories, remember.saved);
       }
       // File activity shown under the reply (needs migration 0004; skipped quietly if it hasn't been run).
       if (run) await supabase.from("messages").update({ tool_log: toolLog(run.steps) }).eq("id", replyId);
@@ -380,7 +389,7 @@ export async function POST(request: Request): Promise<Response> {
 
       if (failure) send({ t: "error", code: failure.code });
       else if (wantsTools) send({ t: "tool_calls", replyId, text: text.slice(priorText.length).trim(), calls });
-      else send({ t: "done", status, sources, grounding: ground, ...(conversation.mode === "quiz" ? { quiz: quizState, content: savedText } : {}) });
+      else send({ t: "done", status, sources, grounding: ground, content: savedText, ...(conversation.mode === "quiz" ? { quiz: quizState } : {}), ...(remembered.length ? { remembered } : {}) });
       try {
         controller.close();
       } catch {}

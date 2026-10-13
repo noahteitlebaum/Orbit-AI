@@ -66,6 +66,7 @@ export const MODE_PROMPTS: Record<StudyMode, string> = {
 
 export function systemPrompt(o: {
   modelLabel: string;
+  personal?: string;        // the student's profile and saved memories (lib/profile/personal.ts)
   projectName?: string;
   projectInstructions?: string;
   mode?: StudyMode;
@@ -79,6 +80,7 @@ export function systemPrompt(o: {
   summary?: string | null;  // summary of earlier messages that no longer fit
 }): string {
   const parts = [`${BASE_SYSTEM_PROMPT}\nYou are ${o.modelLabel}.`];
+  if (o.personal) parts.push(o.personal);
   if (o.projectName) parts.push(`This chat is part of the student's course "${o.projectName}".`);
   if (o.projectInstructions?.trim()) parts.push(`Course instructions from the student:\n${o.projectInstructions.trim()}`);
   if (o.mode && MODE_PROMPTS[o.mode]) parts.push(MODE_PROMPTS[o.mode]);

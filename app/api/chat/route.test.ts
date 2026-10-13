@@ -317,6 +317,36 @@ describe("code execution", () => {
   });
 });
 
+describe("profile and memory", () => {
+  const profile = { display_name: "Noah", program: "BSc CS", level: "2nd year", style: "concise", length: "", about: "", instructions: "Use SI units.", memory_enabled: false };
+  const ask = () => POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "I'm taking STATS 2244, remember that" }));
+
+  it("puts the student's profile in the prompt", async () => {
+    state.live = true;
+    state.fake!.db.profiles = [profile];
+    await readEvents(await ask());
+    expect(state.lastArgs!.system).toContain("Name: Noah. Program: BSc CS. Level: 2nd year.");
+    expect(state.lastArgs!.system).toContain("Use SI units.");
+  });
+
+  it("saves [[remember]] lines only when memory is on, and never shows them", async () => {
+    state.live = true;
+    state.events = [{ delta: "Noted!\n[[remember: Takes STATS 2244]]" }, { usage: { input: 10, output: 5, reasoning: 0, cached: 0 } }];
+    state.fake!.db.profiles = [profile];
+    let done = (await readEvents(await ask())).at(-1);
+    expect(done).toMatchObject({ t: "done", content: "Noted!" });
+    expect(done.remembered).toBeUndefined();
+    expect(state.fake!.db.memories ?? []).toEqual([]);
+
+    state.fake!.db.profiles = [{ ...profile, memory_enabled: true }];
+    state.events = [{ delta: "Noted!\n[[remember: Takes STATS 2244]]" }, { usage: { input: 10, output: 5, reasoning: 0, cached: 0 } }];
+    done = (await readEvents(await ask())).at(-1);
+    expect(done.remembered).toEqual([expect.objectContaining({ content: "Takes STATS 2244", source: "ai" })]);
+    expect(state.fake!.db.messages.at(-1)).toMatchObject({ content: "Noted!" });
+    expect(state.lastArgs!.system).toContain("[[remember:");
+  });
+});
+
 describe("persistent chats and model switching", () => {
   async function ask(body: Record<string, unknown>) {
     return readEvents(await POST(req({ provider: "anthropic", ...body })));
