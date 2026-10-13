@@ -1,8 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { CONTEXT } from "@/config/context";
+import { trackEvent } from "@/lib/analytics/events";
+import { retrieveRelevant } from "@/lib/chat/retrieval";
+import { randomUUID, createHash } from "node:crypto";
 import { FOLDER_ACCESS, PDF_INPUT, getModel, isProvider } from "@/config/models";
 import { dbError, isUuid, json, requireAppUser } from "@/lib/api";
 import { isProviderDisabled, overRateLimit, reserve, settle } from "@/lib/billing/budget";
-import { buildContext, costMicros, estimateTokens, maxOutputFor, reservationMicros, STUDY_MODES, systemPrompt, type StudyMode } from "@/lib/chat/context";
+import { buildEconomicContext, economicInputBudget, costMicros, estimateTokens, maxOutputFor, reservationMicros, STUDY_MODES, systemPrompt, type StudyMode } from "@/lib/chat/context";
 import { citedSources, gatherMaterial, grounding, IMAGE_TOKENS, loadImages, MAX_IMAGES, stripInventedCitations, type Source } from "@/lib/chat/material";
 import { SUMMARY_TOKENS, updateSummary } from "@/lib/chat/summary";
 import { WEB_SEARCH } from "@/config/search";
@@ -12,7 +15,7 @@ import { ADAPTERS, apiKeyFor, liveFor } from "@/lib/providers";
 import { ProviderError, type ChatTurn, type StreamEvent, type ToolCall, type Usage } from "@/lib/providers/types";
 import { FOLDER_TOOLS, folderPrompt, MAX_CALLS_PER_STEP, MAX_TOOL_STEPS } from "@/lib/folder/tools";
 import { CODE_TOOLS, codePrompt } from "@/lib/code/tools";
-import { loadPersonal, parseRemember, personalPrompt, saveMemories, type Memory } from "@/lib/profile/personal";
+import { loadPersonal, relevantMemories, parseRemember, personalPrompt, saveMemories, type Memory } from "@/lib/profile/personal";
 import { parseSteps, stepTurns, toolLog, type Step } from "@/lib/folder/run";
 
 // POST /api/chat — auth → ownership → gates → context (+ course material, images, summary) → reserve → stream → reconcile → save.
@@ -24,10 +27,13 @@ import { parseSteps, stepTurns, toolLog, type Step } from "@/lib/folder/run";
 // Response: newline-delimited JSON events: meta, delta…, then done (with cited sources), tool_calls (browser runs
 // them, then calls again with run), or error.
 export const maxDuration = 300;
+/** Short, opaque cache scope per chat. OpenAI rejects prompt_cache_key values over 64 characters (two UUIDs are 79). */
+const cacheKeyFor = (userId: string, conversationId: string) =>
+  `orbit-${createHash("sha256").update(`${userId}:${conversationId}`).digest("base64url").slice(0, 32)}`;
 const VOICE_MAX_OUTPUT = 1_200; // spoken answers are short; a smaller cap also means a smaller reservation
 
 type Body = {
-  provider?: unknown; modelId?: unknown; content?: unknown; conversationId?: unknown; projectId?: unknown; retry?: unknown;
+  provider?: unknown; homeProvider?: unknown; modelId?: unknown; content?: unknown; conversationId?: unknown; projectId?: unknown; retry?: unknown;
   attachmentIds?: unknown; mode?: unknown; courseOnly?: unknown; folder?: unknown; run?: unknown; web?: unknown; code?: unknown; voice?: unknown;
 };
 type Row = { id: string; seq: number; role: "user" | "assistant"; content: string; status: string; kind: string; attachment_ids: string[] | null; model_id: string | null };
@@ -36,6 +42,7 @@ const MAX_MESSAGE_CHARS = 32_000;
 const MAX_ATTACHMENTS = 10;
 
 export async function POST(request: Request): Promise<Response> {
+  const startedAt = Date.now();
   const auth = await requireAppUser();
   if ("error" in auth) return auth.error;
   const { user, supabase } = auth;
@@ -43,6 +50,8 @@ export async function POST(request: Request): Promise<Response> {
   const body = (await request.json().catch(() => null)) as Body | null;
   if (!body || !isProvider(body.provider)) return json({ error: "bad_request" }, 400);
   const provider = body.provider;
+  if(body.homeProvider!==undefined && !isProvider(body.homeProvider)) return json({error:"bad_request"},400);
+  const homeProvider = isProvider(body.homeProvider)?body.homeProvider:provider;
   const model = getModel(typeof body.modelId === "string" ? body.modelId : undefined);
   if (!model || !model.enabled || model.provider !== provider) return json({ error: "unknown_model" }, 400);
   const retry = body.retry === true;
@@ -71,17 +80,18 @@ export async function POST(request: Request): Promise<Response> {
     const { data, error } = await supabase.from("conversations").select(convCols).eq("id", body.conversationId).maybeSingle();
     if (error) return dbError(error, "load_failed");
     if (!data) return json({ error: "not_found" }, 404);
-    if (data.provider !== provider) return json({ error: "wrong_app" }, 400);
+    // Conversation owner/app is stable for the sidebar; generation provider may change explicitly.
     conversation = data;
   } else {
     if (retry) return json({ error: "bad_request" }, 400);
     const { data, error } = await supabase
       .from("conversations")
-      .insert({ user_id: user.id, provider, model_id: model.id, title: (content || "Files").slice(0, 60), project_id: isUuid(body.projectId) ? body.projectId : null })
+      .insert({ user_id: user.id, provider:homeProvider, model_id: model.id, title: (content || "Files").slice(0, 60), project_id: isUuid(body.projectId) ? body.projectId : null })
       .select(convCols)
       .single();
     if (error || !data) return dbError(error, "save_failed");
     conversation = data;
+    await trackEvent(user.id,"conversation_created",{modelId:model.id,provider,live:liveFor(provider)},conversation.id,`conversation:${conversation.id}`);
   }
 
   // Study mode and "only use my course material" stick to the chat once set.
@@ -102,12 +112,12 @@ export async function POST(request: Request): Promise<Response> {
   let userMessageId: string;
   let priorText = ""; // reply text from earlier rounds of a tool run
   if (run) {
-    const { data: msgs } = await supabase.from("messages").select("id, role, seq, content").eq("conversation_id", conversation.id).order("seq");
+    const { data: msgs } = await supabase.from("messages").select("id, role, seq, content, model_id").eq("conversation_id", conversation.id).order("seq");
     const list = msgs ?? [];
     const reply = list.at(-1);
     const lastUser = [...list].reverse().find((m) => m.role === "user");
     // Only the newest reply can be continued.
-    if (!reply || reply.id !== run.replyId || reply.role !== "assistant" || !lastUser) return json({ error: "bad_request" }, 400);
+    if (!reply || reply.id !== run.replyId || reply.role !== "assistant" || !lastUser || (reply.model_id && reply.model_id!==model.id)) return json({ error: "bad_request" }, 400);
     userMessageId = lastUser.id;
     priorText = reply.content ?? "";
   } else if (retry) {
@@ -124,6 +134,7 @@ export async function POST(request: Request): Promise<Response> {
       .single();
     if (error || !data) return dbError(error, "save_failed");
     userMessageId = data.id;
+    await trackEvent(user.id,"message_sent",{modelId:model.id,provider,mode:conversation.mode,live:liveFor(provider)},conversation.id,`message:${data.id}`);
   }
 
   // Profile + memories load in parallel with the rest (they don't depend on it).
@@ -140,6 +151,8 @@ export async function POST(request: Request): Promise<Response> {
     (m) => m.kind === "text" && m.status !== "error" && m.id !== run?.replyId && (m.content || m.attachment_ids?.length),
   );
   const history: ChatTurn[] = rows.map((m) => ({ role: m.role, content: m.content }));
+  const previousModel = [...rows].reverse().find(m=>m.role==='assistant')?.model_id;
+  if (!retry && !run && previousModel && previousModel!==model.id) await trackEvent(user.id,"model_switched",{modelId:model.id,provider},conversation.id,`switch:${userMessageId}`);
   const question = [...rows].reverse().find((m) => m.role === "user")?.content ?? content;
 
   // ---- course + material from files
@@ -191,7 +204,7 @@ export async function POST(request: Request): Promise<Response> {
       const query = searchQuery(question, previousQ);
       const searchId = randomUUID();
       const cost = Math.ceil(WEB_SEARCH.pricePerSearch * 1_000_000);
-      const r = await reserve(user.id, searchId, "web-search", "text", cost);
+      const r = await reserve(user.id, searchId, "web-search", "text", cost, {conversationId:conversation.id,provider:"tavily",operation:"search",unitCostUsdMicros:cost});
       if (!r.ok) return json({ error: r.reason === "budget" ? "budget" : r.reason === "global_stop" ? "paused" : "reserve_failed", conversationId: conversation.id }, r.reason === "budget" ? 402 : 503);
       try {
         const results = await webSearch(query, key);
@@ -230,8 +243,9 @@ export async function POST(request: Request): Promise<Response> {
 
   // ---- the student's profile and saved memories (Settings; migration 0008)
   const personal = await personalP;
+  const selectedMemories = relevantMemories(personal.memories, question);
   const promptBase = {
-    modelLabel: model.label, personal: personalPrompt(personal.profile, personal.memories), projectName: project?.name, projectInstructions: project?.instructions,
+    modelLabel: model.label, personal: personalPrompt(personal.profile, selectedMemories), projectName: project?.name, projectInstructions: project?.instructions,
     mode: conversation.mode as StudyMode, quiz: quizText, material: material.block, courseOnly: conversation.course_only,
     hasFiles: material.hasFiles, unreadable: material.unreadable, notes: [...material.notes, ...webNotes], web: webBlock,
     voice,
@@ -243,8 +257,10 @@ export async function POST(request: Request): Promise<Response> {
   const runTurns = run ? stepTurns(run.steps) : [];
   const runTokens = runTurns.reduce((n, t) => n + estimateTokens(t.content + JSON.stringify(t.toolCalls ?? t.toolResults ?? "")), 0);
   const folderText = [codeOn && tools ? codePrompt(material.dataFiles) : "", folderName && !voice ? folderPrompt(folderName, MAX_TOOL_STEPS - stepsUsed) : ""].filter(Boolean).join("\n\n");
-  const baseTokens = estimateTokens(systemPrompt(promptBase) + folderText) + imageCount * IMAGE_TOKENS + material.visualTokens + runTokens + (tools ? 1500 : 0);
-  const ctx = buildContext(history, model.contextTokens - baseTokens - SUMMARY_TOKENS);
+  const baseTokens = estimateTokens(systemPrompt(promptBase) + folderText) + imageCount * IMAGE_TOKENS + material.visualTokens + runTokens + (tools ? estimateTokens(JSON.stringify(tools)) + 400 : 0);
+  const contextTarget = economicInputBudget(history, baseTokens + SUMMARY_TOKENS + CONTEXT.retrievalTokens,
+    model.contextTokens - model.maxOutputTokens, Boolean(tools || material.hasFiles));
+  const ctx = buildEconomicContext(history, Math.max(0, contextTarget - baseTokens - SUMMARY_TOKENS - CONTEXT.retrievalTokens));
 
   // ---- long chat: fold messages that no longer fit into a running summary (live only; charged like any call).
   // The summary is only sent when older messages are actually left out (a bigger model may see them all).
@@ -267,6 +283,20 @@ export async function POST(request: Request): Promise<Response> {
     }
   }
 
+  const keptIds = new Set(rows.slice(rows.length-ctx.turns.length).map(r=>r.id));
+  const retrieval = live && (ctx.dropped || personal.memories.length>12) ? await retrieveRelevant({supabase,userId:user.id,conversationId:conversation.id,
+    enabled:Boolean(personal.profile?.memory_enabled),query:question,excluded:new Set([...keptIds,...selectedMemories.map(m=>m.id)]),memories:personal.memories,
+    sources:[...(summary ? [{id:conversation.id,kind:"summary" as const,content:summary}] : []),
+      ...rows.filter(r=>!keptIds.has(r.id)).reverse().map(r=>({id:r.id,kind:"message" as const,content:r.content}))]}) : {block:"",count:0};
+  if (retrieval.count) await trackEvent(user.id,"context_retrieved",{count:retrieval.count,live},conversation.id,`retrieved:${requestId}`);
+  // Disclose incomplete summary coverage, including budget failures and gradual backlog processing.
+  let summaryIncomplete = false;
+  if (ctx.dropped) {
+    const {data: checkpoint} = await supabase.from("conversations").select("summary_upto").eq("id",conversation.id).maybeSingle();
+    const lastDropped = rows[rows.length-ctx.turns.length-1]?.seq;
+    summaryIncomplete = lastDropped!=null && (checkpoint?.summary_upto==null || checkpoint.summary_upto<lastDropped);
+  }
+
   // ---- images on the kept turns go to the vision model
   const keptRows = rows.slice(rows.length - ctx.turns.length);
   const images = await loadImages(supabase, keptRows.map((r, i) => ({ messageIndex: i, ids: r.attachment_ids ?? [] })).filter((m) => m.ids.length));
@@ -281,24 +311,31 @@ export async function POST(request: Request): Promise<Response> {
     ...runTurns,
   ];
 
-  const system = [systemPrompt({ ...promptBase, summary }), folderText].filter(Boolean).join("\n\n");
+  const system = [systemPrompt({ ...promptBase, summary, retrieved:retrieval.block }), folderText].filter(Boolean).join("\n\n");
   // Tool definitions count as input too (~1.5k tokens for all of them).
-  const inputTokens = ctx.tokens + runTokens + (tools ? 1500 : 0) + estimateTokens(system) + [...images.values()].flat().length * IMAGE_TOKENS + material.visualTokens;
+  const inputTokens = ctx.tokens + runTokens + (tools ? estimateTokens(JSON.stringify(tools)) + 400 : 0) + estimateTokens(system) + [...images.values()].flat().length * IMAGE_TOKENS + material.visualTokens;
+
+  if (inputTokens > Math.min(model.contextTokens-model.maxOutputTokens,CONTEXT.maximumInputTokens)) {
+    return json({error:"context_too_large",conversationId:conversation.id},413);
+  }
+  const callMetadata = {conversationId:conversation.id,provider,operation:"chat" as const,inputEstimate:inputTokens,
+    contextTarget,historyDropped:ctx.dropped,retrievedCount:retrieval.count};
 
   // ---- reservation (live only)
   let maxOutput = voice ? Math.min(model.maxOutputTokens, VOICE_MAX_OUTPUT) : model.maxOutputTokens;
   if (live) {
-    let r = await reserve(user.id, requestId, model.id, "text", reservationMicros(model, inputTokens, maxOutput));
+    let r = await reserve(user.id, requestId, model.id, "text", reservationMicros(model, inputTokens, maxOutput),callMetadata);
     if (!r.ok && r.reason === "budget" && r.remaining) {
       // Shrink the reply to fit what's left, if that still allows a useful answer.
       const fit = Math.min(maxOutput, maxOutputFor(model, inputTokens, r.remaining));
       if (fit >= 500) {
         maxOutput = fit;
-        r = await reserve(user.id, requestId, model.id, "text", reservationMicros(model, inputTokens, maxOutput));
+        r = await reserve(user.id, requestId, model.id, "text", reservationMicros(model, inputTokens, maxOutput),callMetadata);
       }
     }
     if (!r.ok) {
-      const code = r.reason === "global_stop" ? "paused" : r.reason === "budget" ? "budget" : "reserve_failed";
+      if(r.reason==="budget") await trackEvent(user.id,"allowance_exhausted",{modelId:model.id,provider,live},conversation.id);
+      const code = r.reason === "global_stop" ? "paused" : ["budget","trial_expired","fx_not_configured"].includes(r.reason) ? r.reason : "reserve_failed";
       return json({ error: code, conversationId: conversation.id }, code === "budget" ? 402 : 503);
     }
   }
@@ -333,7 +370,7 @@ export async function POST(request: Request): Promise<Response> {
 
       send({
         t: "meta", conversationId: conversation.id, title: conversation.title, userMessageId, replyId, modelId: model.id,
-        dropped: ctx.dropped, summarized: Boolean(ctx.dropped && summary), mode: conversation.mode, courseOnly: conversation.course_only,
+        dropped: ctx.dropped, summaryIncomplete, summarized: Boolean(ctx.dropped && summary), mode: conversation.mode, courseOnly: conversation.course_only,
         attachmentIds: linked,
       });
 
@@ -344,7 +381,7 @@ export async function POST(request: Request): Promise<Response> {
       let failure: ProviderError | null = null;
       try {
         const events = live
-          ? ADAPTERS[provider].stream({ model, system, history: turns, maxOutput, apiKey: apiKey!, signal: AbortSignal.timeout(240_000), tools, fast: voice })
+          ? ADAPTERS[provider].stream({ model, system, history: turns, maxOutput, apiKey: apiKey!, signal: AbortSignal.timeout(240_000), tools, fast: voice, cacheKey: cacheKeyFor(user.id, conversation.id) })
           : mockStream(model.label, history, ctx.dropped, allSources, conversation.mode);
         for await (const ev of events) {
           if (ev.delta) {
@@ -360,7 +397,7 @@ export async function POST(request: Request): Promise<Response> {
           // the actual cost instead of the full reservation.
         }
       } catch (e) {
-        failure = e instanceof ProviderError ? e : new ProviderError((e as Error)?.name === "TimeoutError" ? "timeout" : "unknown", undefined, text.length > priorText.length);
+        failure = e instanceof ProviderError ? e : new ProviderError((e as Error)?.name === "TimeoutError" ? "timeout" : "unknown", undefined, true);
       }
 
       const stopped = clientGone && !failure;
@@ -389,11 +426,15 @@ export async function POST(request: Request): Promise<Response> {
       if (run) await supabase.from("messages").update({ tool_log: toolLog(run.steps) }).eq("id", replyId);
 
       if (live) {
-        if (usage) await settle(requestId, "settled", costMicros(model, usage), usage, failure?.code);
+        if (usage) await settle(requestId, "settled", costMicros(model, usage), usage, failure?.code, {latencyMs:Date.now()-startedAt});
         else if (failure && !failure.started && text.length === priorText.length) await settle(requestId, "released", 0, undefined, failure.code);
         else await settle(requestId, "uncertain", 0, undefined, failure?.code ?? "no_usage");
       }
 
+      await trackEvent(user.id,"response_completed",{modelId:model.id,provider,live,status,latencyMs:Date.now()-startedAt},conversation.id,`response:${requestId}`);
+      for(const feature of [conversation.mode!=="chat"?conversation.mode:null,tools?.length?"tools":null,wantsWeb?"web_search":null].filter(Boolean)) {
+        await trackEvent(user.id,"feature_used",{feature:feature!,provider,live},conversation.id,`feature:${requestId}:${feature}`);
+      }
       if (failure) send({ t: "error", code: failure.code });
       else if (wantsTools) send({ t: "tool_calls", replyId, text: text.slice(priorText.length).trim(), calls });
       else send({ t: "done", status, sources, grounding: ground, content: savedText, ...(conversation.mode === "quiz" ? { quiz: quizState } : {}), ...(remembered.length ? { remembered } : {}) });

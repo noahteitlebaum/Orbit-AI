@@ -23,8 +23,8 @@ function toInput(t: ChatTurn): object[] {
 export const openai: ProviderAdapter = {
   id: "openai",
 
-  async *stream({ model, system, history, maxOutput, apiKey, signal, tools, fast }) {
-    const call = (lowEffort: boolean) => fetch("https://api.openai.com/v1/responses", {
+  async *stream({ model, system, history, maxOutput, apiKey, signal, tools, fast, cacheKey }) {
+    const call = (lowEffort: boolean, useCacheKey = true) => fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -36,11 +36,13 @@ export const openai: ProviderAdapter = {
         max_output_tokens: maxOutput,
         stream: true,
         store: false,
+        ...(cacheKey && useCacheKey ? { prompt_cache_key: cacheKey.slice(0, 64) } : {}),
       }),
       signal,
     });
     let res = await call(Boolean(fast));
-    if (fast && res.status === 400) res = await call(false); // a model without reasoning settings: ask normally
+    // A 400 can come from an optional setting this model doesn't accept: retry once with the plain request.
+    if (res.status === 400 && (fast || cacheKey)) res = await call(false, false);
     if (!res.ok || !res.body) throw errorForStatus(res.status);
 
     for await (const { data } of readSse(res.body)) {
@@ -59,6 +61,7 @@ export const openai: ProviderAdapter = {
               output: u.output_tokens ?? 0,
               reasoning: u.output_tokens_details?.reasoning_tokens ?? 0,
               cached: u.input_tokens_details?.cached_tokens ?? 0,
+              cacheWrite: u.input_tokens_details?.cache_write_tokens ?? 0,
             },
           };
         }

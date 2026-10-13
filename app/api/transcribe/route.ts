@@ -30,8 +30,13 @@ export async function POST(request: Request) {
   const hint = typeof form?.get("hint") === "string" ? (form!.get("hint") as string) : undefined;
 
   const id = randomUUID();
-  const r = await reserve(user.id, id, VOICE.ledgerId, "text", micros(seconds, VOICE.reservePerMinute));
-  if (!r.ok) return json({ error: r.reason === "budget" ? "budget" : r.reason === "global_stop" ? "paused" : "reserve_failed" }, r.reason === "budget" ? 402 : 503);
+  const r = await reserve(user.id, id, VOICE.ledgerId, "text", micros(seconds, VOICE.reservePerMinute), {
+    provider: "openai", operation: "transcription", unitCostUsdMicros: micros(60, VOICE.pricePerMinute),
+  });
+  if (!r.ok) {
+    const code = r.reason === "global_stop" ? "paused" : ["budget", "trial_expired", "fx_not_configured"].includes(r.reason) ? r.reason : "reserve_failed";
+    return json({ error: code }, r.reason === "budget" ? 402 : 503);
+  }
   try {
     const text = await transcribe(audio, type, key, hint);
     await settle(id, "settled", micros(seconds, VOICE.pricePerMinute));

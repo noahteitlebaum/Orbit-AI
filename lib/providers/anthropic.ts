@@ -31,7 +31,7 @@ function toMessage(t: ChatTurn) {
 export const anthropic: ProviderAdapter = {
   id: "anthropic",
 
-  async *stream({ model, system, history, maxOutput, apiKey, signal, tools }) {
+  async *stream({ model, system, history, maxOutput, apiKey, signal, tools, cacheKey }) {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -43,6 +43,7 @@ export const anthropic: ProviderAdapter = {
         model: model.apiModel,
         max_tokens: maxOutput,
         system,
+        ...(cacheKey ? { cache_control: { type: "ephemeral" } } : {}),
         messages: normalizeTurns(history).map(toMessage),
         ...(tools?.length ? { tools: tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters })) } : {}),
         stream: true,
@@ -53,6 +54,7 @@ export const anthropic: ProviderAdapter = {
 
     let input = 0;
     let cached = 0;
+    let cacheWrite = 0;
     let output = 0;
     const blocks = new Map<number, { id: string; name: string; json: string }>(); // tool_use blocks being streamed
     for await (const { data } of readSse(res.body)) {
@@ -60,8 +62,9 @@ export const anthropic: ProviderAdapter = {
       switch (ev.type) {
         case "message_start": {
           const u = ev.message?.usage ?? {};
-          cached = (u.cache_read_input_tokens ?? 0) + (u.cache_creation_input_tokens ?? 0);
-          input = (u.input_tokens ?? 0) + cached;
+          cached = u.cache_read_input_tokens ?? 0;
+          cacheWrite = u.cache_creation_input_tokens ?? 0;
+          input = (u.input_tokens ?? 0) + cached + cacheWrite;
           output = u.output_tokens ?? 0;
           break;
         }
@@ -87,7 +90,7 @@ export const anthropic: ProviderAdapter = {
           if (ev.usage?.output_tokens != null) output = ev.usage.output_tokens;
           break;
         case "message_stop":
-          yield { usage: { input, output, reasoning: 0, cached } };
+          yield { usage: { input, output, reasoning: 0, cached, cacheWrite, reasoningReported: false } };
           return;
         case "error":
           throw new ProviderError(ev.error?.type === "overloaded_error" ? "unavailable" : "unknown", undefined, true);

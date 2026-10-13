@@ -30,7 +30,7 @@ describe("/api/speak", () => {
     const [url, init] = vi.mocked(fetch).mock.calls[0];
     expect(url).toBe("https://api.openai.com/v1/audio/speech");
     expect(JSON.parse(String(init!.body))).toMatchObject({ model: "gpt-4o-mini-tts", voice: "cedar" });
-    expect(budget.reserve).toHaveBeenCalledWith("u1", expect.any(String), "voice-speak", "text", 1000); // 50 chars × $0.02 per 1,000
+    expect(budget.reserve).toHaveBeenCalledWith("u1", expect.any(String), "voice-speak", "text", 1000, { provider: "openai", operation: "speech" }); // 50 chars × $0.02 per 1,000
   });
 
   it("prefers ElevenLabs when its key is set", async () => {

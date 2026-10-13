@@ -10,7 +10,7 @@ export async function GET(_: Request, ctx: RouteContext<"/api/conversations/[id]
   const { id } = await ctx.params;
   if (!isUuid(id)) return json({ error: "not_found" }, 404);
 
-  const { data: conv } = await auth.supabase.from("conversations").select("id, mode, course_only, summary").eq("id", id).maybeSingle();
+  const { data: conv } = await auth.supabase.from("conversations").select("id, mode, course_only, summary, summary_upto").eq("id", id).maybeSingle();
   if (!conv) return json({ error: "not_found" }, 404);
   const { data: q } = await auth.supabase.from("conversations").select("quiz_state").eq("id", id).maybeSingle(); // migration 0006
   const cols = "id, role, kind, content, image_path, model_id, status, attachment_ids, sources";
@@ -39,6 +39,8 @@ export async function GET(_: Request, ctx: RouteContext<"/api/conversations/[id]
     mode: conv.mode,
     courseOnly: conv.course_only,
     summarized: Boolean(conv.summary),
+    // Never imply that an old partial summary covers everything after reopening.
+    summaryIncomplete: Boolean(conv.summary && conv.summary_upto==null),
     quiz: q?.quiz_state ?? null,
     messages: (rows ?? []).map((m) => ({
       id: m.id,
@@ -68,7 +70,7 @@ export async function PATCH(request: Request, ctx: RouteContext<"/api/conversati
   if (typeof body.modelId === "string") {
     const { data: conv } = await auth.supabase.from("conversations").select("provider").eq("id", id).maybeSingle();
     const model = getModel(body.modelId);
-    if (!conv || !model || model.provider !== conv.provider) return json({ error: "unknown_model" }, 400);
+    if (!conv || !model || !model.enabled) return json({ error: "unknown_model" }, 400);
     patch.model_id = model.id;
   }
   if (!Object.keys(patch).length) return json({ error: "bad_request" }, 400);

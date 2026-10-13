@@ -4,6 +4,7 @@ import { fakeSupabase } from "@/test/fake-supabase";
 
 // Upload route with mocked auth + database (files are read for real).
 const state = vi.hoisted(() => ({ fake: null as ReturnType<typeof import("@/test/fake-supabase").fakeSupabase> | null }));
+vi.mock("@/lib/analytics/events",()=>({trackEvent:vi.fn(async()=>{})}));
 vi.mock("@/lib/api", async (orig) => ({
   ...(await orig<typeof import("@/lib/api")>()),
   requireAppUser: async () => ({ user: { id: "user-1" }, supabase: state.fake!.client }),

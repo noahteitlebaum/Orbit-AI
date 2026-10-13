@@ -1,3 +1,4 @@
+import { xaiBillableOutput } from "./usage";
 import { readSse } from "./sse";
 import { decodeBase64, errorForStatus, normalizeTurns, parseArgs, ProviderError, toolSchema, type ChatTurn, type ProviderAdapter } from "./types";
 
@@ -26,10 +27,10 @@ function toMessages(t: ChatTurn): object[] {
 export const xai: ProviderAdapter = {
   id: "xai",
 
-  async *stream({ model, system, history, maxOutput, apiKey, signal, tools }) {
+  async *stream({ model, system, history, maxOutput, apiKey, signal, tools, cacheKey }) {
     const res = await fetch("https://api.x.ai/v1/chat/completions", {
       method: "POST",
-      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+      headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json", ...(cacheKey ? { "x-grok-conv-id": cacheKey } : {}) },
       body: JSON.stringify({
         model: model.apiModel,
         messages: [
@@ -65,8 +66,8 @@ export const xai: ProviderAdapter = {
         yield {
           usage: {
             input: ev.usage.prompt_tokens ?? 0,
-            // Counted on top of completion tokens: if xAI already includes them we over-charge slightly, never under.
-            output: (ev.usage.completion_tokens ?? 0) + reasoning,
+            // Aggregate tells us whether reasoning is already included, avoiding duplicate charges.
+            output: xaiBillableOutput(ev.usage.prompt_tokens ?? 0, ev.usage.completion_tokens ?? 0, reasoning, ev.usage.total_tokens),
             reasoning,
             cached: ev.usage.prompt_tokens_details?.cached_tokens ?? 0,
           },

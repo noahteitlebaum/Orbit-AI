@@ -3,7 +3,7 @@
 Read this first in every AI session. Also read `docs/PRODUCT_SPEC.md`, `docs/ARCHITECTURE.md`, and `docs/TASKS.md`. If anything here conflicts with a direct instruction from Noah, follow Noah and update this file.
 
 ## What this is
-A mobile-friendly web app that gives verified @uwo.ca students one place to use OpenAI, Anthropic (Claude), Google (Gemini) and xAI (Grok). Each AI app (ChatGPT, Claude, Gemini, Grok) has its own chat list; inside a chat, students can switch between that app's models and keep the context. Chats and courses never carry over between apps: each app has its own chats and its own courses (Noah, Oct 2026). **Launch: Monday Oct 19 2026.**
+A mobile-friendly web app that gives verified @uwo.ca students one place to use OpenAI, Anthropic (Claude), Google (Gemini) and xAI (Grok). Each AI app (ChatGPT, Claude, Gemini, Grok) has its own chat list and courses. Per Jake's October 13 request, the composer model picker now explicitly selects models across providers within a saved chat. The original app remains the chat/course home; the selected provider receives the shared visible history and summary. Sidebar tabs still open separate chat lists. **Launch: Monday Oct 19 2026.**
 
 ## Stack (provisional; change it here if it changes)
 - Next.js (App Router) + TypeScript + Tailwind
@@ -97,7 +97,14 @@ Model comparison, smart model routing, connectors (Drive/GitHub…), coding/comp
 ## UI theme
 All styling uses the Orbit AI design system ("Orbit Night" dark default, "Orbit Day" light), defined as CSS variables in `app/globals.css` and exposed as Tailwind utilities (`bg-surface-100`, `text-ink-muted`, `border-line`, `bg-brand`, `text-on-brand`, `bg-provider-anthropic`, `shadow-card`…). Never use Tailwind palette colors (zinc, red…) or raw hex in components. Brand pieces (`Wordmark`, `OrbitBackdrop`, `ProviderDot`) live in `components/brand.tsx`; logo PNGs in `public/brand/`. Provider colors are dots beside the model name.
 
-**Chat themes (Noah's decision, Oct 2026):** the chat screen has a left rail with each AI app's logo (ChatGPT, Claude, Gemini, Grok). Picking one opens that app's own chat list and re-skins the chat to look like that app: `data-theme="<provider>"` on the chat root re-points the tokens (colors, fonts) in `app/globals.css`; layout differences (greeting, composer/bubble shapes, reply font, disclaimer) live in `config/themes.ts`. The model menu in the message box (`components/model-menu.tsx`) lists only that app's models from `config/models.ts`. Logos are files in `public/providers/` set via `logo` in `config/themes.ts`. Auth pages and the rest of the app stay on Orbit Night/Day.
+**Chat themes (Noah's decision, Oct 2026):** the chat screen has a left rail with each AI app's logo (ChatGPT, Claude, Gemini, Grok). Picking one opens that app's own chat list and re-skins the chat to look like that app: `data-theme="<provider>"` on the chat root re-points the tokens (colors, fonts) in `app/globals.css`; layout differences (greeting, composer/bubble shapes, reply font, disclaimer) live in `config/themes.ts`. The model menu in the message box (`components/model-menu.tsx`) lists all enabled models from `config/models.ts`; explicit selection can continue a chat with another provider. Logos are files in `public/providers/` set via `logo` in `config/themes.ts`. Auth pages and the rest of the app stay on Orbit Night/Day.
+
+## Jake phase-one context/analytics work (October 13, 2026)
+- Read `docs/SMART_MEMORY_ANALYTICS.md` for audit, priorities, staging rollout, definitions, benchmark assumptions and remaining risks.
+- Budget wrappers now require migration 0009 v2 RPCs. USD ledger expenses/charges stay separate; CAD trial allowances use a configured, period-snapshot `settings.usd_cad_rate`. No implicit FX quote. Existing tester budgets are preserved.
+- Optional semantic retrieval requires migration 0010, `SMART_MEMORY_ENABLED=on` and the student's memory opt-in. It stays inside the current chat plus saved memories; disabling memory purges derived vectors.
+- Staff dashboard: `/admin/analytics`, migration 0011, `ANALYTICS_ADMIN_EMAILS` server allowlist. Events contain metadata only. Receipt schema exists; payment ingestion/renewal remain deferred and payments disabled.
+- `npm run benchmark:context` measures synthetic estimated payload cost, not live answer quality. `npm run typecheck` generates Next route types before compiling on a clean clone.
 
 <!-- BEGIN:nextjs-agent-rules -->
 

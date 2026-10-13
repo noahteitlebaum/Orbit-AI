@@ -3,6 +3,8 @@ const ERRORS: Record<string, string> = {
   voice_demo: "Voice works once live answers are turned on.",
   voice_not_configured: "Voice isn't set up yet (it needs the OpenAI key).",
   budget: "Not enough budget left to transcribe this.",
+  trial_expired: "Your free trial has ended. Contact the Orbit team for next steps.",
+  fx_not_configured: "Usage billing is not configured yet. Contact the Orbit team.",
   too_long: "That recording was too long. Keep it under 5 minutes.",
   rate_limited: "Too many requests. Wait a moment and try again.",
   bad_audio: "Your browser recorded audio in a format we can't read.",

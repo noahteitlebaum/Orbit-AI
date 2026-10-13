@@ -48,17 +48,17 @@ type Message = {
   remembered?: string[]; // memories this answer saved (Settings → Memory)
 };
 type Pending = { key: string; file?: UploadedFile; name: string; uploading: boolean; error?: string };
-type ChatSettings = { mode: StudyMode; courseOnly: boolean; web?: boolean; summarized?: boolean; quiz?: QuizState | null };
+type ChatSettings = { mode: StudyMode; courseOnly: boolean; web?: boolean; summarized?: boolean; summaryIncomplete?: boolean; quiz?: QuizState | null };
 type ConvSummary = { id: string; title: string; modelId: string; projectId: string | null; updatedAt: string };
 type Project = { id: string; name: string; instructions: string };
-type Usage = { live: boolean; liveProviders?: ProviderId[]; allowance: number; spent: number; reserved: number; typical?: Record<string, number> };
+type Usage = { live: boolean; liveProviders?: ProviderId[]; allowance: number; spent: number; reserved: number; typical?: Record<string, number>; allowanceCad?: number | null; usdCadRate?: number | null; expiresAt?: string | null };
 
 const APP_KEY = "polar.app.v1";
 const SIDEBAR_KEY = "orbit.sidebar.collapsed";
 const DRAFT = "draft"; // messages key for a chat that hasn't been saved yet
 const tmpId = () => `tmp-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
 const perProvider = <T,>(v: () => T) => Object.fromEntries(PROVIDERS.map((p) => [p, v()])) as Record<ProviderId, T>;
-const dollars = (micros: number) => `$${(micros / 1_000_000).toFixed(2)}`;
+const dollars = (micros: number) => `US$${(micros / 1_000_000).toFixed(2)}`;
 
 function errorText(code: string, label: string, appName: string): string {
   switch (code) {
@@ -66,6 +66,9 @@ function errorText(code: string, label: string, appName: string): string {
     case "paused": return "Orbit AI is paused by the team right now. Your chat is saved — try again later.";
     case "rate_limited": return "That's a lot of messages in a minute. Wait a moment, then try again.";
     case "not_configured": return `${label} isn't set up yet (missing API key or price).`;
+    case "trial_expired": return "Your free trial has ended. Contact the Orbit team for next steps.";
+    case "fx_not_configured": return "Usage billing is not configured yet. Contact the Orbit team.";
+    case "context_too_large": return "This request is too large for the chat context limit. Try fewer files or split the question into smaller parts.";
     case "provider_disabled": return `${appName} is turned off by the team right now. Try another app on the left.`;
     case "no_image_model": return `${appName} can't make images.`;
     case "message_too_long": return "That message is too long. Try splitting it up.";
@@ -141,7 +144,8 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
   const active = appConvs?.find((c) => c.id === activeId) ?? null;
   const msgKey = active ? active.id : `${DRAFT}:${provider}`;
   const thread = messages[msgKey] ?? [];
-  const modelId = getModel(active?.modelId)?.provider === provider ? active!.modelId : draftModels[provider];
+  const modelId = getModel(active?.modelId) ? active!.modelId : draftModels[provider];
+  const generationProvider = getModel(modelId)?.provider ?? provider;
   const currentModel = getModel(modelId);
   const empty = thread.length === 0;
 
@@ -249,12 +253,12 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     (async () => {
       const res = await fetch(`/api/conversations/${id}`).catch(() => null);
       if (!res || handleAuth(res) || !res.ok) return;
-      const out = (await res.json()) as { messages: Message[]; mode?: StudyMode; courseOnly?: boolean; summarized?: boolean; quiz?: QuizState | null };
+      const out = (await res.json()) as { messages: Message[]; mode?: StudyMode; courseOnly?: boolean; summarized?: boolean; summaryIncomplete?: boolean; quiz?: QuizState | null };
       const withActivity = out.messages.map((m) =>
         m.toolLog?.length ? { ...m, activity: m.toolLog.map((t, i) => ({ id: `${m.id}-${i}`, name: t.name, label: t.label, status: t.status, code: t.code, stdout: t.output })) } : m,
       );
       setMessages((prev) => (prev[id] ? prev : { ...prev, [id]: withActivity }));
-      setSettings((prev) => (prev[id] ? prev : { ...prev, [id]: { mode: out.mode ?? "chat", courseOnly: Boolean(out.courseOnly), summarized: out.summarized, quiz: out.quiz } }));
+      setSettings((prev) => (prev[id] ? prev : { ...prev, [id]: { mode: out.mode ?? "chat", courseOnly: Boolean(out.courseOnly), summarized: out.summarized, summaryIncomplete:out.summaryIncomplete, quiz: out.quiz } }));
     })();
   }, [active, messages, handleAuth]);
 
@@ -287,10 +291,11 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
   }
 
   async function setModel(id: string) {
-    if (getModel(id)?.provider !== provider) return;
+    if (!getModel(id)?.enabled) return;
     if (active) {
+      const res=await fetch(`/api/conversations/${active.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ modelId: id }) }).catch(()=>null);
+      if(!res?.ok) {alertLine("Couldn't save the model change. Try again."); return;}
       setConvs((prev) => ({ ...prev, [provider]: (prev[provider] ?? []).map((c) => (c.id === active.id ? { ...c, modelId: id } : c)) }));
-      fetch(`/api/conversations/${active.id}`, { method: "PATCH", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ modelId: id }) });
     } else setDraftModels((prev) => ({ ...prev, [provider]: id }));
   }
 
@@ -485,7 +490,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     abortRef.current = controller;
 
     // Folder tools only with the browser's permission. If it lapsed, this click lets the browser ask again.
-    let link = FOLDER_ACCESS[provider] ? folder : null;
+    let link = FOLDER_ACCESS[generationProvider] ? folder : null;
     if (link) {
       const ok = (await permission(link.handle, true).catch(() => "denied")) === "granted";
       setFolderOnline(ok);
@@ -501,7 +506,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       if (f.status !== "failed" && DATA_FILE.test(f.name)) dataFiles.set(f.id, f.name);
     }
     const code = codeSupported();
-    const common = { provider, modelId, mode: chatSettings.mode, courseOnly: chatSettings.courseOnly, web: Boolean(chatSettings.web), code, voice: opts.voice || undefined, folder: link ? { name: link.name } : undefined };
+    const common = { provider: generationProvider, homeProvider: provider, modelId, mode: chatSettings.mode, courseOnly: chatSettings.courseOnly, web: Boolean(chatSettings.web), code, voice: opts.voice || undefined, folder: link ? { name: link.name } : undefined };
     let body: object = { ...common, content, retry, attachmentIds, conversationId: convId, projectId: active ? undefined : filter };
     const steps: Step[] = [];
     const dataCache = new Map<string, RunFile>(); // data files downloaded once per reply
@@ -545,6 +550,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                 currentKey = convId = ev.conversationId;
               }
               setDropped((prev) => ({ ...prev, [ev.conversationId]: ev.dropped }));
+              setSettings((prev)=>({...prev,[ev.conversationId]:{...(prev[ev.conversationId]??chatSettings),summaryIncomplete:Boolean(ev.summaryIncomplete)}}));
               if (ev.summarized) setSettings((prev) => ({ ...prev, [ev.conversationId]: { ...(prev[ev.conversationId] ?? chatSettings), summarized: true } }));
             } else if (ev.t === "delta") patchReply((m) => ({ ...m, content: m.content + ev.v }));
             else if (ev.t === "done") {
@@ -774,7 +780,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
 
   // Warn while there's still room to finish the session, in answers rather than dollars, and offer the cheapest model.
   const remainingNow = usage?.live ? usage.allowance - usage.spent - usage.reserved : Infinity;
-  const cheapest = [...modelsFor(provider)].sort((a, b) => typicalAnswerMicros(a, usage?.typical) - typicalAnswerMicros(b, usage?.typical))[0];
+  const cheapest = [...modelsFor(generationProvider)].sort((a, b) => typicalAnswerMicros(a, usage?.typical) - typicalAnswerMicros(b, usage?.typical))[0];
   const perAnswer = currentModel ? typicalAnswerMicros(currentModel, usage?.typical) : 0;
   const cheapPerAnswer = cheapest ? typicalAnswerMicros(cheapest, usage?.typical) : 0;
   const offerCheaper = cheapest && cheapest.id !== modelId && remainingNow >= cheapPerAnswer;
@@ -879,7 +885,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden><path d="M3 9v2M6.5 6.5v7M10 4v12M13.5 6.5v7M17 9v2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" /></svg>
     </button>
   );
-  const modelMenu = imageMode ? null : <ModelMenu provider={provider} value={modelId} onChange={setModel} disabled={busy} />;
+  const modelMenu = imageMode ? null : <ModelMenu provider={generationProvider} value={modelId} onChange={setModel} disabled={busy} />;
 
   const composer = (
     <form onSubmit={(e) => { e.preventDefault(); send(input); }} className="w-full"
@@ -1039,7 +1045,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
           <div className="mb-1.5 flex justify-between">
             <span className="font-medium">{usage?.live ? "Budget" : "Demo mode"}</span>
             <span className="tabular-nums text-ink-muted">
-              {usage?.live ? `${dollars(remaining)} left of ${dollars(usage.allowance)}` : "Replies are fake"}
+              {usage?.live ? usage.usdCadRate && usage.allowanceCad!=null ? `C$${(Math.max(0,remaining)*usage.usdCadRate/1e6).toFixed(2)} left of C$${(usage.allowanceCad/1e6).toFixed(2)}` : `${dollars(remaining)} left of ${dollars(usage.allowance)}` : "Replies are fake"}
             </span>
           </div>
           {usage?.live && currentModel && (
@@ -1057,9 +1063,9 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
               <summary className="cursor-pointer select-none text-ink-subtle hover:text-ink-muted">How your budget works</summary>
               <ul className="mt-1.5 list-disc space-y-1 pl-4">
                 <li>Each answer costs a little, based on how long the chat, files and answer are. Bigger models cost more per answer.</li>
-                <li>Before an answer starts, its most it could cost is set aside, so you can never go over. Afterwards you only pay what it really cost; the rest comes back.</li>
+                <li>A cost estimate is set aside before each reply. Provider usage determines the final charge and unused credit is released.</li>
                 <li>Long chats and big files cost more per answer. Starting a new chat, or a cheaper model, makes your budget last longer.</li>
-                <li>If an answer fails before it starts, you aren&apos;t charged.</li>
+                <li>If a request is rejected, its credit is released. If the provider outcome is unknown, the full estimate may be charged until reviewed.</li>
               </ul>
             </details>
           )}
@@ -1150,7 +1156,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
               <div className="mx-auto max-w-3xl px-4 py-6">
                 {active && (dropped[active.id] || chatSettings.summarized) && (
                   <p className="mb-6 rounded-xl bg-surface-200 px-4 py-2.5 text-center text-xs text-ink-muted">
-                    {chatSettings.summarized
+                    {chatSettings.summaryIncomplete ? "Some earlier messages have not been summarized yet. Full history is saved; ask again or restate any important details." : chatSettings.summarized
                       ? `This chat is long: ${currentModel?.label ?? "the model"} gets a summary of older messages plus the recent ones.`
                       : `Older messages not included — this chat is longer than ${currentModel?.label ?? "the model"} is sent at once.`}
                   </p>
@@ -1259,7 +1265,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
         )}
         <p className="px-4 pb-3 pt-2 text-center text-xs text-ink-muted">
           {theme.disclaimer}
-          {usage && !usage.liveProviders?.includes(provider) && <span className="text-ink-subtle"> Demo mode: {theme.appName} replies are fake until its API key is added.</span>}
+          {usage && !usage.liveProviders?.includes(generationProvider) && <span className="text-ink-subtle"> Demo mode: {currentModel?.providerLabel} replies are fake until its API key is added.</span>}
         </p>
       </main>
 

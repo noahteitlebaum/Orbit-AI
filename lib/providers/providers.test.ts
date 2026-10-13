@@ -66,7 +66,7 @@ describe("adapters", () => {
       `data: ${JSON.stringify({ type: "response.completed", response: { usage: { input_tokens: 10, output_tokens: 5, output_tokens_details: { reasoning_tokens: 2 } } } })}`,
     ]));
     vi.stubGlobal("fetch", fetchMock);
-    expect(await collect(openai.stream(args()))).toEqual({ text: "Hello", usage: { input: 10, output: 5, reasoning: 2, cached: 0 } });
+    expect(await collect(openai.stream(args()))).toEqual({ text: "Hello", usage: { input: 10, output: 5, reasoning: 2, cached: 0, cacheWrite: 0 } });
     const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
     expect(body).toMatchObject({ model: "test-model", instructions: "sys", max_output_tokens: 100, stream: true });
   });
@@ -79,7 +79,7 @@ describe("adapters", () => {
       `event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}`,
     ]));
     vi.stubGlobal("fetch", fetchMock);
-    expect(await collect(anthropic.stream(args()))).toEqual({ text: "Hi", usage: { input: 10, output: 9, reasoning: 0, cached: 3 } });
+    expect(await collect(anthropic.stream(args()))).toEqual({ text: "Hi", usage: { input: 10, output: 9, reasoning: 0, cached: 3, cacheWrite: 0, reasoningReported: false } });
     const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
     expect(body.system).toBe("sys");
     expect(body.messages[0]).toEqual({ role: "user", content: "hi" });
@@ -244,5 +244,18 @@ describe("key names", () => {
     expect(apiKeyFor("anthropic", { ANTHROPIC_API_KEY: "a", CLAUDE_API_KEY: "b" })).toBe("a");
     expect(apiKeyFor("google", { GOOGLE_API_KEY: "g" })).toBe("g");
     expect(liveFor("anthropic", { LIVE_MODELS: "on", CLAUDE_API_KEY: "x" })).toBe(true);
+  });
+});
+
+describe("openai optional settings", () => {
+  afterEach(() => vi.unstubAllGlobals());
+  it("keeps prompt_cache_key within 64 characters and retries a 400 without optional settings", async () => {
+    const ok = () => sseResponse([`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "ok" })}`]);
+    const fetchMock = vi.fn().mockResolvedValueOnce(new Response("bad", { status: 400 })).mockResolvedValueOnce(ok());
+    vi.stubGlobal("fetch", fetchMock);
+    expect((await collect(openai.stream({ ...args(), cacheKey: "x".repeat(80) }))).text).toBe("ok");
+    const body = (i: number) => JSON.parse((fetchMock.mock.calls[i] as unknown as [string, RequestInit])[1].body as string);
+    expect(body(0).prompt_cache_key).toHaveLength(64);
+    expect(body(1).prompt_cache_key).toBeUndefined();
   });
 });

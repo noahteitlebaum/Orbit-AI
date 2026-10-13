@@ -47,3 +47,15 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done. Keep optional features of
 - Jake: currency, initial budget, trial amount, launch mode (Oct 5). Subscription rules and policy text (Oct 10)
 - Natan: tester count, survey destination, launch volume (Oct 10)
 - Team: Oct 17–19 coverage (Oct 16)
+
+## Jake branch: smart memory / economics / analytics
+- [x] Audit existing context, adapters, budget ledger and reporting; write priorities/rollout in SMART_MEMORY_ANALYTICS.md
+- [x] Economic context targets, bounded memories, incremental summary checkpoints, explicit cross-provider model selection
+- [x] Cache-aware cost accounting and separate actual provider cost vs uncertain budget charges
+- [x] CAD trial allowance/FX/expiry records, privacy-safe event instrumentation and staff aggregates/dashboard
+- [x] Optional pgvector retrieval with opt-in, user isolation and deletion/purge behavior
+- [x] Mock adapter/route tests and actual local Postgres migration/RLS tests; synthetic cost benchmark
+- [ ] Noah/Jake: stage migrations, set FX/admin allowlist, validate live provider invoices and model availability
+- [ ] Jake/Natan: measure live synthetic recall, response accuracy, provider switching and phone UX before enabling retrieval
+- [ ] Second-model review before merging cost/context/auth changes; do not enable payments with this branch
+- [ ] Future payment integration: verified conversion/refund/cancellation receipts and atomic renewal/reset rules

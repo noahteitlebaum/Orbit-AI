@@ -33,7 +33,7 @@ describe("POST /api/transcribe", () => {
   it("transcribes, reserving first and charging the real length after", async () => {
     const res = await POST(req(webm()));
     expect(await res.json()).toEqual({ text: "What is a p-value?", seconds: 10 });
-    expect(budget.reserve).toHaveBeenCalledWith("u1", expect.any(String), "voice-transcribe", "text", 1000);
+    expect(budget.reserve).toHaveBeenCalledWith("u1", expect.any(String), "voice-transcribe", "text", 1000, expect.objectContaining({ operation: "transcription" }));
     expect(budget.settle).toHaveBeenCalledWith(expect.any(String), "settled", 500);
     const [url, init] = vi.mocked(fetch).mock.calls[0];
     expect(url).toBe("https://api.openai.com/v1/audio/transcriptions");

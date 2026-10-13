@@ -15,6 +15,7 @@ const state = vi.hoisted(() => ({
   lastArgs: null as null | { system: string; history: { role: string; content: string; images?: unknown[]; toolCalls?: unknown[]; toolResults?: unknown[] }[]; tools?: { name: string }[] },
 }));
 
+vi.mock("@/lib/analytics/events",()=>({trackEvent:vi.fn(async()=>{})}));
 vi.mock("@/lib/api", async (orig) => ({
   ...(await orig<typeof import("@/lib/api")>()),
   requireAppUser: async () => ({ user: { id: "user-1" }, supabase: state.fake!.client }),
@@ -66,6 +67,12 @@ describe("POST /api/chat", () => {
     expect(res.status).toBe(400);
   });
 
+  it("new chats retain the sidebar/course home when choosing another provider",async()=>{
+    const res=await POST(req({provider:"anthropic",homeProvider:"openai",modelId:"anthropic-default",content:"hi"}));
+    await readEvents(res);
+    expect(state.fake!.db.conversations[0]).toMatchObject({provider:"openai",model_id:"anthropic-default"});
+  });
+
   it("demo mode: creates the chat, streams, saves both messages, never touches the budget", async () => {
     const res = await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "hello" }));
     const events = await readEvents(res);
@@ -84,7 +91,7 @@ describe("POST /api/chat", () => {
     await readEvents(res);
     expect(budget.reserve).toHaveBeenCalledOnce();
     // Sonnet 5.5: $2 in / $10 out per 1M → 1000×2 + 100×10 = 3000 micros
-    expect(budget.settle).toHaveBeenCalledWith(expect.any(String), "settled", 3000, expect.anything(), undefined);
+    expect(budget.settle).toHaveBeenCalledWith(expect.any(String), "settled", 3000, expect.anything(), undefined, expect.objectContaining({latencyMs:expect.any(Number)}));
     expect(state.fake!.db.messages[1]).toMatchObject({ content: "Hi there", status: "complete", model_id: "anthropic-default" });
   });
 
@@ -131,10 +138,13 @@ describe("POST /api/chat", () => {
     expect(msgs.filter((m) => m.role === "assistant").map((m) => m.status)).toEqual(["complete"]);
   });
 
-  it("won't continue a chat from another app", async () => {
+  it("continues the same saved chat after explicitly switching provider", async () => {
     const first = await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "q" })));
     const res = await POST(req({ provider: "openai", modelId: "openai-default", content: "q2", conversationId: first[0].conversationId }));
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(200);
+    const events=await readEvents(res);
+    expect(events[0]).toMatchObject({conversationId:first[0].conversationId});
+    expect(state.fake!.db.conversations).toHaveLength(1);
   });
 
   describe("files", () => {
@@ -258,7 +268,7 @@ describe("folder tools", () => {
     expect(last).toMatchObject({ t: "tool_calls", text: "Let me check.", calls: [readCall] });
     const reply = state.fake!.db.messages.find((m) => m.id === last.replyId)!;
     expect(reply).toMatchObject({ role: "assistant", status: "partial", content: "Let me check." });
-    expect(budget.settle).toHaveBeenCalledWith(expect.any(String), "settled", expect.any(Number), expect.anything(), undefined);
+    expect(budget.settle).toHaveBeenCalledWith(expect.any(String), "settled", expect.any(Number), expect.anything(), undefined, expect.objectContaining({latencyMs:expect.any(Number)}));
   });
 
   it("continues the same reply with the tool results, as a separate budgeted call", async () => {
@@ -438,7 +448,7 @@ describe("web search", () => {
     state.events = [{ delta: "It's 2.25% [W1] [W4]." }, { usage: { input: 10, output: 5, reasoning: 0, cached: 0 } }];
     const first = await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "What is the Bank of Canada policy rate now?", web: true })));
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(budget.reserve).toHaveBeenCalledWith("user-1", expect.any(String), "web-search", "text", 8000);
+    expect(budget.reserve).toHaveBeenCalledWith("user-1", expect.any(String), "web-search", "text", 8000, expect.objectContaining({operation:"search",provider:"tavily"}));
     expect(budget.settle).toHaveBeenCalledWith(expect.any(String), "settled", 8000);
     expect(state.lastArgs!.system).toContain("[W1] Bank of Canada rate — https://www.bankofcanada.ca/rates/");
     const done = first.at(-1);

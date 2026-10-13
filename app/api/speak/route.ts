@@ -29,8 +29,8 @@ export async function POST(request: Request) {
 
   const id = randomUUID();
   const cost = speechMicros(s.kind, text.length);
-  const r = await reserve(auth.user.id, id, SPEECH.ledgerId, "text", cost);
-  if (!r.ok) return json({ error: r.reason === "budget" ? "budget" : "reserve_failed" }, r.reason === "budget" ? 402 : 503);
+  const r = await reserve(auth.user.id, id, SPEECH.ledgerId, "text", cost, { provider: s.kind, operation: "speech" });
+  if (!r.ok) return json({ error: ["budget", "trial_expired", "fx_not_configured"].includes(r.reason) ? r.reason : "reserve_failed" }, r.reason === "budget" ? 402 : 503);
   const res = await synthesize(s, text, voice, request.signal).catch(() => null);
   if (!res?.ok || !res.body) {
     await settle(id, "released", 0, undefined, `speak_${res?.status ?? "failed"}`);

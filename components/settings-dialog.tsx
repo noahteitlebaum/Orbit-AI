@@ -201,8 +201,9 @@ export function SettingsDialog({ open, tab: initialTab, onClose, email, appName,
                 <span>
                   <span className="block text-sm font-medium">Use memory</span>
                   <span className="block text-xs text-ink-subtle">
-                    The AI reads these notes in every chat and can save new ones when you tell it something lasting (it will say when it does).
-                    Off: nothing below is used and nothing new is saved.
+                    The AI uses relevant saved notes and can save new ones when you tell it something lasting.
+                    When semantic search is enabled, earlier chat excerpts and saved notes are sent to OpenAI to find relevant context.
+                    Turning this off stops saved-memory use and semantic search and removes search vectors; your saved notes and chat history remain.
                   </span>
                 </span>
               </label>

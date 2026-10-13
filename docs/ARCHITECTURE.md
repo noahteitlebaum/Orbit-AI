@@ -82,3 +82,11 @@ Chat requests send `folder: { name }`, and adapters pass the tools from `lib/fol
 function-calling format. A round that ends in tool calls streams `tool_calls`; the browser runs them on the folder
 (`lib/folder/browser-fs.ts`; changes need Apply unless "Don't ask for edits", deletes always ask; nothing extra is written
 into the folder) and continues the same reply with `run: { replyId, steps }`. Every round is its own reserve → call → settle.
+
+## Implemented phase-one update (October 13)
+The older `src/` diagram above describes the original scaffold. Current code is under root `app/`, `lib/` and `config/`.
+See [SMART_MEMORY_ANALYTICS.md](SMART_MEMORY_ANALYTICS.md) for the exact implementation and rollout.
+Economic input targets are separate from provider windows (8k ordinary, 16k files/tools, controlled expansion capped at 24k estimated input); summaries and recent exchanges stay provider-neutral.
+A saved conversation's provider field now identifies its sidebar/course home; model_id selects generation and may belong to another provider after an explicit model-picker choice.
+USD actual provider costs live in `ledger.actual_usd_micros`; `actual_micros` retains legacy budget-charge semantics. Unknown outcomes have no known provider cost. Money units are integer millionths of currency units, not micro-cents.
+New CAD trial budgets snapshot FX into USD credit counters and expire after their assigned trial. Paid subscriptions/renewals remain disabled.
