@@ -18,6 +18,7 @@ import { ACCEPT_ATTR, fileNote, uploadFile, type UploadedFile } from "@/lib/file
 import { FolderDialog } from "@/components/folder-dialog";
 import { ExportMenu, type ExportOption } from "@/components/export-menu";
 import { SettingsDialog, type SettingsTab } from "@/components/settings-dialog";
+import { AccountMenu } from "@/components/account-menu";
 import { answerMarkdown, chatMarkdown, cleanAnswer, fileSlug, markdownTables, saveFile, toCsv, toPlainText, type ExportMessage } from "@/lib/export/export";
 import { FolderActivity, previewFor, type Activity } from "@/components/folder-activity";
 import { loadApprovalMode, loadFolder, permission, runFolderTool, saveApprovalMode, saveFolder, type ApprovalMode, type FolderLink } from "@/lib/folder/browser-fs";
@@ -50,6 +51,7 @@ type Project = { id: string; name: string; instructions: string };
 type Usage = { live: boolean; liveProviders?: ProviderId[]; allowance: number; spent: number; reserved: number; typical?: Record<string, number> };
 
 const APP_KEY = "polar.app.v1";
+const SIDEBAR_KEY = "orbit.sidebar.collapsed";
 const DRAFT = "draft"; // messages key for a chat that hasn't been saved yet
 const tmpId = () => `tmp-${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
 const perProvider = <T,>(v: () => T) => Object.fromEntries(PROVIDERS.map((p) => [p, v()])) as Record<ProviderId, T>;
@@ -88,7 +90,20 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
   const [dropped, setDropped] = useState<Record<string, boolean>>({});
   const [input, setInput] = useState("");
   const [imageMode, setImageMode] = useState(false);
-  const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [sidebarOpen, setSidebarOpen] = useState(false); // phone: slide-in menu
+  const [collapsed, setCollapsed] = useState(false); // computer: chats sidebar hidden (remembered)
+  useEffect(() => {
+    try {
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setCollapsed(localStorage.getItem(SIDEBAR_KEY) === "1");
+    } catch {}
+  }, []);
+  function toggleSidebar(next: boolean) {
+    setCollapsed(next);
+    try {
+      localStorage.setItem(SIDEBAR_KEY, next ? "1" : "0");
+    } catch {}
+  }
   const [busy, setBusy] = useState(false);
   const [usage, setUsage] = useState<Usage | null>(null);
   const [ready, setReady] = useState(false); // saved app choice restored
@@ -859,6 +874,9 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     </form>
   );
 
+  const sidebarIcon = (
+    <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden><rect x="2.75" y="3.75" width="14.5" height="12.5" rx="2.25" fill="none" stroke="currentColor" strokeWidth="1.5" /><path d="M7.75 4v12" stroke="currentColor" strokeWidth="1.5" /></svg>
+  );
   const remaining = usage?.live ? usage.allowance - usage.spent - usage.reserved : 0;
   const usedPct = usage?.live && usage.allowance > 0 ? Math.min(100, ((usage.spent + usage.reserved) / usage.allowance) * 100) : 0;
 
@@ -879,15 +897,21 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
             </button>
           );
         })}
+        <div className="mt-auto">
+          <AccountMenu compact email={email} onSettings={() => setSettingsOpen("profile")} signOut={signOut} />
+        </div>
       </nav>
 
       {/* This app's projects + chats */}
-      <aside className={`fixed inset-y-0 left-0 z-30 flex w-72 flex-col bg-surface-100 transition-transform md:static md:translate-x-0 ${sidebarOpen ? "translate-x-0" : "-translate-x-full"}`}>
+      <aside className={`fixed inset-y-0 left-0 z-30 flex w-72 flex-col bg-surface-100 transition-transform md:static md:translate-x-0 ${sidebarOpen ? "translate-x-0" : "-translate-x-full"} ${collapsed ? "md:hidden" : ""}`}>
         <div className="flex items-center gap-2.5 px-5 pb-3 pt-5">
           <ProviderLogo provider={provider} size={22} />
           <span className="text-[22px] font-normal tracking-tight">{theme.appName}</span>
           <button onClick={() => setSidebarOpen(false)} className="ml-auto rounded-md p-1 text-ink-muted hover:text-ink md:hidden" aria-label="Close menu">
             <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
+          </button>
+          <button onClick={() => toggleSidebar(true)} className="ml-auto hidden rounded-lg p-1.5 text-ink-muted hover:bg-surface-200 hover:text-ink md:block" aria-label="Collapse sidebar" title="Collapse sidebar">
+            {sidebarIcon}
           </button>
         </div>
         <div className="px-3">
@@ -995,15 +1019,10 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
               </ul>
             </details>
           )}
-          <button type="button" onClick={() => setSettingsOpen("profile")}
-            className="mt-3 flex w-full items-center gap-2 rounded-xl px-2 py-1.5 text-left text-sm text-ink-muted hover:bg-surface-200 hover:text-ink">
-            <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden className="shrink-0"><circle cx="8" cy="8" r="2.2" fill="none" stroke="currentColor" strokeWidth="1.3" /><path d="M8 1.8v1.6M8 12.6v1.6M1.8 8h1.6M12.6 8h1.6M3.6 3.6l1.1 1.1M11.3 11.3l1.1 1.1M3.6 12.4l1.1-1.1M11.3 4.7l1.1-1.1" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" /></svg>
-            Settings
-          </button>
-          <p className="mt-1 truncate px-2 text-xs text-ink-subtle">{email}</p>
-          <form action={signOut} className="px-2">
-            <button className="mt-0.5 text-xs text-ink-subtle underline underline-offset-[3px] hover:text-ink-muted">Sign out</button>
-          </form>
+        </div>
+        {/* Phone: account at the bottom of the menu (computers have it at the bottom of the app rail) */}
+        <div className="border-t border-line px-3 py-2 md:hidden">
+          <AccountMenu email={email} onSettings={() => { setSidebarOpen(false); setSettingsOpen("profile"); }} signOut={signOut} />
         </div>
       </aside>
       {sidebarOpen && <div className="fixed inset-0 z-20 bg-black/50 md:hidden" onClick={() => setSidebarOpen(false)} />}
@@ -1011,6 +1030,16 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       {/* Main */}
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="flex min-h-14 items-center gap-2 px-4 py-2.5">
+          {collapsed && (
+            <div className="hidden items-center gap-1 md:flex">
+              <button onClick={() => toggleSidebar(false)} className="rounded-lg p-1.5 text-ink-muted hover:bg-surface-200 hover:text-ink" aria-label="Open sidebar" title="Open sidebar">
+                {sidebarIcon}
+              </button>
+              <button onClick={newChat} className="rounded-lg p-1.5 text-ink-muted hover:bg-surface-200 hover:text-ink" aria-label="New chat" title="New chat">
+                <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden><path d="M11.5 4.5H5.5a1.5 1.5 0 0 0-1.5 1.5v8.5A1.5 1.5 0 0 0 5.5 16H14a1.5 1.5 0 0 0 1.5-1.5v-6M13.6 3.4a1.4 1.4 0 0 1 2 2L10 11l-2.6.6.6-2.6 5.6-5.6z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
+              </button>
+            </div>
+          )}
           <button onClick={() => setSidebarOpen(true)} className="rounded-md p-1 text-ink-muted hover:text-ink md:hidden" aria-label="Open menu">
             <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden><path d="M2.5 4h11M2.5 8h11M2.5 12h11" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
           </button>
