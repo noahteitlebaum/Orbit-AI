@@ -101,6 +101,7 @@ async function foldIn(
 
   let text = "";
   let usage: Usage | undefined;
+  let incomplete=false;
   try {
     for await (const ev of ADAPTERS[o.provider].stream({
       model, system, maxOutput, apiKey: o.apiKey, signal: AbortSignal.timeout(60_000),
@@ -108,6 +109,7 @@ async function foldIn(
     })) {
       if (ev.delta) text += ev.delta;
       if (ev.usage) usage = ev.usage;
+      if(ev.finish && !["stop"].includes(ev.finish)) incomplete=true;
     }
   } catch {
     if(usage) await settle(requestId,"settled",costMicros(model,usage),usage,"summary_failed");
@@ -116,5 +118,5 @@ async function foldIn(
   }
   if (usage) await settle(requestId, "settled", costMicros(model, usage), usage);
   else await settle(requestId, "uncertain", 0, undefined, "no_usage");
-  return text.trim() || null;
+  return incomplete ? null : text.trim() || null;
 }

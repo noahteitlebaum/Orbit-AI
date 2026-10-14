@@ -10,19 +10,30 @@ import { answersLeft, answersText, isLow, timesCheaper, typicalAnswerMicros } fr
 import { signOut } from "../login/actions";
 import { ProviderLogo } from "@/components/provider-logo";
 import { ModelMenu } from "@/components/model-menu";
-import { ToolsMenu, type StudyMode } from "@/components/tools-menu";
+import { ToolsMenu, type ConnectedApp, type StudyMode } from "@/components/tools-menu";
 import { ProjectDialog } from "@/components/project-dialog";
 import { FileChip } from "@/components/file-chip";
-import { AnswerText, SourceList, type Source } from "@/components/answer-text";
+import { SourceList, type Source } from "@/components/answer-text";
 import { ACCEPT_ATTR, fileNote, uploadFile, type UploadedFile } from "@/lib/files/upload-client";
 import { FolderDialog } from "@/components/folder-dialog";
 import { ExportMenu, type ExportOption } from "@/components/export-menu";
+import { CopyAnswer, Markdown } from "@/components/markdown";
 import { SettingsDialog, type SettingsTab } from "@/components/settings-dialog";
 import { AccountMenu } from "@/components/account-menu";
 import { VoiceButton } from "@/components/voice-button";
 import { SpeakButton } from "@/components/speak-button";
 import { VoiceMode } from "@/components/voice-mode";
-import { answerMarkdown, chatMarkdown, cleanAnswer, fileSlug, markdownTables, saveFile, toCsv, toPlainText, type ExportMessage } from "@/lib/export/export";
+import { OneDriveDialog } from "@/components/onedrive-dialog";
+import { GitHubDialog } from "@/components/github-dialog";
+import { MailDialog, type MailTarget } from "@/components/mail-dialog";
+import { SearchChats } from "@/components/search-chats";
+import { NotionDialog, YouTubeDialog, ZoteroDialog } from "@/components/connector-dialogs";
+import { notionSignInConfigured } from "@/lib/connectors/notion-client";
+import { googleConfigured, googleDriveConfigured, pickFromGoogleDrive } from "@/lib/connectors/google-drive";
+import { oneDriveConfigured } from "@/lib/connectors/onedrive";
+import { ConnectorError } from "@/lib/connectors/types";
+import { extractCards, toFlashcardText } from "@/lib/export/flashcards";
+import { answerMarkdown, chatMarkdown, cleanAnswer, fileSlug, normalizeMath, markdownTables, saveFile, toCsv, toPlainText, type ExportMessage } from "@/lib/export/export";
 import { FolderActivity, previewFor, type Activity } from "@/components/folder-activity";
 import { loadApprovalMode, loadFolder, permission, runFolderTool, saveApprovalMode, saveFolder, type ApprovalMode, type FolderLink } from "@/lib/folder/browser-fs";
 import { describeCall, isFolderTool, isWriteTool } from "@/lib/folder/tools";
@@ -39,6 +50,7 @@ type Message = {
   content: string;
   imageUrl?: string | null;
   modelId?: string;
+  finishReason?: string;
   status: "complete" | "partial" | "streaming" | "error";
   error?: string; // friendly error text for a failed reply
   attachments?: { id: string; name: string; kind: string; status: string; error?: string | null; project_id?: string | null }[];
@@ -68,6 +80,7 @@ function errorText(code: string, label: string, appName: string): string {
     case "not_configured": return `${label} isn't set up yet (missing API key or price).`;
     case "trial_expired": return "Your free trial has ended. Contact the Orbit team for next steps.";
     case "fx_not_configured": return "Usage billing is not configured yet. Contact the Orbit team.";
+    case "incomplete_stream": return "The connection ended before the model finished. Your partial reply is saved.";
     case "context_too_large": return "This request is too large for the chat context limit. Try fewer files or split the question into smaller parts.";
     case "provider_disabled": return `${appName} is turned off by the team right now. Try another app on the left.`;
     case "no_image_model": return `${appName} can't make images.`;
@@ -81,6 +94,15 @@ function errorText(code: string, label: string, appName: string): string {
     default: return `${label} didn't respond. Your chat is saved.`;
   }
 }
+
+// Starter suggestions under the empty-chat composer (like the apps' prompt chips), tuned for studying.
+const STARTERS: { label: string; icon: string; text: string; mode?: StudyMode; upload?: boolean }[] = [
+  { label: "Explain a concept", icon: "💡", text: "", mode: "explain" },
+  { label: "Quiz me", icon: "🎯", text: "", mode: "quiz" },
+  { label: "Summarize notes", icon: "📄", text: "Summarize these notes into the key points I need to know: ", upload: true },
+  { label: "Make flashcards", icon: "🗂️", text: "Make flashcards on " },
+  { label: "Plan my week", icon: "🗓️", text: "Help me plan my study week. My deadlines and exams are: " },
+];
 
 export function ChatApp({ email, userId }: { email: string; userId: string }) {
   const router = useRouter();
@@ -123,7 +145,27 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
   const [folderOnline, setFolderOnline] = useState(false); // false = the browser wants permission again
   const [folderDialog, setFolderDialog] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState<SettingsTab | null>(null);
+  const [firstName, setFirstName] = useState("");
+  const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
+  const [searchOpen, setSearchOpen] = useState(false);
+  const [isMac, setIsMac] = useState(false);
+  // Shortcuts the apps share: ⌘/Ctrl+K search chats, ⌘/Ctrl+Shift+O new chat.
+  useEffect(() => {
+    setIsMac(/Mac|iPhone|iPad/.test(navigator.platform)); // eslint-disable-line react-hooks/set-state-in-effect
+    const onKey = (e: KeyboardEvent) => {
+      const mod = e.metaKey || e.ctrlKey;
+      if (mod && !e.shiftKey && e.key.toLowerCase() === "k") { e.preventDefault(); setSearchOpen((o) => !o); }
+      if (mod && e.shiftKey && e.key.toLowerCase() === "o") { e.preventDefault(); newChatRef.current(); }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, []);
+  const newChatRef = useRef<() => void>(() => {});
   const [voiceOpen, setVoiceOpen] = useState(false); // voice conversation screen
+  const [oneDriveOpen, setOneDriveOpen] = useState(false);
+  const [githubOpen, setGithubOpen] = useState(false);
+  const [mailTarget, setMailTarget] = useState<MailTarget>(null);
+  const [appOpen, setAppOpen] = useState<"notion" | "zotero" | "youtube" | null>(null);
   const [memoryVersion, setMemoryVersion] = useState(0);
   const [codeOk, setCodeOk] = useState(false); // this browser can run Python (known only after mount)
   useEffect(() => {
@@ -155,19 +197,32 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     attachments: m.attachments?.map((a) => a.name),
     runs: m.activity?.filter((a) => a.name === "run_python").map((a) => ({ code: a.code, stdout: a.stdout, files: a.outputs?.map((f) => f.name) })),
   });
+  function office(kind: "docx" | "xlsx" | "pptx", base: string, title: string, md: string) {
+    const nice = title.charAt(0).toUpperCase() + title.slice(1);
+    import("@/lib/export/office").then((o) => o.downloadOffice(kind, base, nice, md)).catch(() => alertLine("Couldn't make that file. Try again."));
+  }
   function answerOptions(m: Message, index: number): ExportOption[] {
     const question = [...thread.slice(0, index)].reverse().find((x) => x.role === "user")?.content ?? "";
     const base = fileSlug(question || active?.title || "");
     const md = answerMarkdown(forExport(m));
     const tables = markdownTables(cleanAnswer(m.content, m.sources));
+    const cards = extractCards(cleanAnswer(m.content, m.sources).replace(/\s?\[[SW]\d+\]/g, ""));
     return [
       { label: "Markdown (.md)", hint: "Keeps headings, equations and sources", run: () => saveFile(`${base}.md`, md, "text/markdown") },
       { label: "Plain text (.txt)", run: () => saveFile(`${base}.txt`, toPlainText(md), "text/plain") },
+      { label: "Word (.docx)", hint: "Formatted document", run: () => office("docx", base, question.slice(0, 80) || "Orbit answer", md) },
+      { label: "PowerPoint (.pptx)", hint: "Slides from the headings and points", run: () => office("pptx", base, question.slice(0, 80) || "Orbit answer", md) },
+      ...(tables.length ? [{ label: "Excel (.xlsx)", hint: `${tables.length} table${tables.length === 1 ? "" : "s"}, one sheet each`, run: () => office("xlsx", base, "", md) }] : []),
       ...tables.map((t, i) => ({
         label: tables.length === 1 ? "Table as CSV (.csv)" : `Table ${i + 1} as CSV (.csv)`,
         hint: `${t[0].slice(0, 3).join(", ")}${t[0].length > 3 ? "…" : ""} · ${t.length - 1} rows`,
         run: () => saveFile(`${base}${tables.length > 1 ? `-table-${i + 1}` : ""}.csv`, toCsv(t), "text/csv"),
       })),
+      ...(cards.length >= 2 ? [{
+        label: "Flashcards for Anki / Quizlet (.txt)",
+        hint: `${cards.length} cards · import as tab-separated text`,
+        run: () => saveFile(`${base}-flashcards.txt`, toFlashcardText(cards), "text/plain"),
+      }] : []),
     ];
   }
   const exportable = thread.filter((m) => m.kind === "text" && m.status !== "error" && (m.content.trim() || m.activity?.length));
@@ -177,6 +232,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     return [
       { label: "Whole chat as Markdown", hint: "Questions, answers, equations and sources", run: () => saveFile(`${fileSlug(title, "orbit-chat")}.md`, md(), "text/markdown") },
       { label: "Whole chat as text", run: () => saveFile(`${fileSlug(title, "orbit-chat")}.txt`, toPlainText(md()), "text/plain") },
+      { label: "Whole chat as Word (.docx)", run: () => office("docx", fileSlug(title, "orbit-chat"), title, md()) },
     ];
   }
   const chatSettings: ChatSettings = settings[msgKey] ?? { mode: "chat", courseOnly: false };
@@ -193,6 +249,14 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     }
     return false;
   }, [router]);
+
+  // The student's first name (Settings → Profile) for the apps' personal greetings; refreshed when Settings closes.
+  useEffect(() => {
+    if (settingsOpen) return;
+    fetch("/api/profile").then((r) => (r.ok ? r.json() : null)).then((j: { profile?: { display_name?: string } } | null) => {
+      if (j) setFirstName((j.profile?.display_name ?? "").trim().split(/\s+/)[0] ?? "");
+    }).catch(() => {});
+  }, [settingsOpen]);
 
   const loadUsage = useCallback(async () => {
     const res = await fetch("/api/usage").catch(() => null);
@@ -262,9 +326,28 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     })();
   }, [active, messages, handleAuth]);
 
+  // Follow the reply while the student is at the bottom; if they scroll up to read, stay put and show a ↓ button.
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const stick = useRef(true);
+  const [awayFromBottom, setAwayFromBottom] = useState(false);
+  const onThreadScroll = () => {
+    const el = scrollRef.current;
+    if (!el) return;
+    const away = el.scrollHeight - el.scrollTop - el.clientHeight > 120;
+    stick.current = !away;
+    setAwayFromBottom(away);
+  };
+  const toBottom = (smooth = true) => {
+    const el = scrollRef.current;
+    if (el) el.scrollTo({ top: el.scrollHeight, behavior: smooth ? "smooth" : "auto" });
+  };
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [messages, msgKey]);
+    stick.current = true;
+    requestAnimationFrame(() => toBottom(false));
+  }, [msgKey]);
+  useEffect(() => {
+    if (stick.current) toBottom(false);
+  }, [messages]);
 
   // ---------------------------------------------------------------- helpers
   const patchMessages = (key: string, fn: (m: Message[]) => Message[]) =>
@@ -308,6 +391,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     setSidebarOpen(false);
   }
 
+  newChatRef.current = () => newChat();
   function newChat() {
     setActive(null);
     setMessages((prev) => ({ ...prev, [`${DRAFT}:${provider}`]: [] }));
@@ -401,6 +485,30 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     }
   }
 
+  // Cloud files (lib/connectors): picked in Google's picker or our OneDrive browser, then uploaded like any file.
+  async function pickGoogleDrive() {
+    try {
+      const files = await pickFromGoogleDrive(alertLine);
+      if (files.length) await attachFiles(files);
+    } catch (e) {
+      alertLine(e instanceof ConnectorError ? e.message : "Couldn't open Google Drive. Try again.");
+    }
+  }
+  const msSetup = oneDriveConfigured ? undefined : "Needs NEXT_PUBLIC_MICROSOFT_CLIENT_ID";
+  const googleSetup = googleConfigured ? undefined : "Needs NEXT_PUBLIC_GOOGLE_CLIENT_ID";
+  const cloudSources: ConnectedApp[] = [
+    { id: "github", group: "Files", name: "GitHub", hint: "Code from a repository", onPick: () => setGithubOpen(true) },
+    { id: "google-drive", group: "Files", name: "Google Drive", hint: "Docs, Sheets, Slides, PDFs", onPick: pickGoogleDrive, setup: googleDriveConfigured ? undefined : "Needs Google Drive keys" },
+    { id: "onedrive", group: "Files", name: "OneDrive", hint: "Western or personal files", onPick: () => setOneDriveOpen(true), setup: msSetup },
+    { id: "outlook", group: "Mail & calendar", name: "Outlook", hint: "Search and add emails", onPick: () => setMailTarget({ kind: "mail", source: "outlook" }), setup: msSetup },
+    { id: "outlook-calendar", group: "Mail & calendar", name: "Outlook Calendar", hint: "Your upcoming events", onPick: () => setMailTarget({ kind: "calendar", source: "outlook" }), setup: msSetup },
+    { id: "gmail", group: "Mail & calendar", name: "Gmail", hint: "Search and add emails", onPick: () => setMailTarget({ kind: "mail", source: "gmail" }), setup: googleSetup },
+    { id: "google-calendar", group: "Mail & calendar", name: "Google Calendar", hint: "Your upcoming events", onPick: () => setMailTarget({ kind: "calendar", source: "google" }), setup: googleSetup },
+    { id: "notion", group: "Notes & research", name: "Notion", hint: "Pages and databases", onPick: () => setAppOpen("notion"), setup: notionSignInConfigured ? undefined : "Needs NEXT_PUBLIC_NOTION_CLIENT_ID" },
+    { id: "zotero", group: "Notes & research", name: "Zotero", hint: "References, abstracts, notes", onPick: () => setAppOpen("zotero") },
+    { id: "youtube", group: "Notes & research", name: "YouTube", hint: "Ask about a video (Gemini)", onPick: () => setAppOpen("youtube") },
+  ];
+
   const loadCourseFiles = useCallback(async (projectId: string) => {
     const res = await fetch(`/api/files?projectId=${projectId}`).catch(() => null);
     if (res?.ok) {
@@ -456,12 +564,13 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
   }, []);
 
   // ---------------------------------------------------------------- sending
-  async function send(text: string, retry = false, opts: { voice?: boolean } = {}) {
+  async function send(text: string, retry = false, opts: { voice?: boolean; edit?: boolean } = {}) {
     const content = text.trim();
     const ready = pending.filter((p) => p.file);
     if ((!content && !retry && !ready.length) || busy || pending.some((p) => p.uploading)) return;
     const key = msgKey;
     const label = currentModel?.label ?? theme.appName;
+    stick.current = true; // a new question always brings the view to the bottom
 
     const attachmentIds = retry || imageMode ? [] : ready.map((p) => p.file!.id);
     if (!retry) {
@@ -470,10 +579,11 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       setInput("");
       if (!imageMode) setPending([]);
     } else {
-      // Drop the failed reply; the server does the same.
+      // Drop the failed reply (or, for an edit, rewrite the question); the server does the same.
       patchMessages(key, (m) => {
         const last = m.map((x) => x.role).lastIndexOf("user");
-        return m.slice(0, last + 1);
+        const kept = m.slice(0, last + 1);
+        return opts.edit && content ? kept.map((x, i) => (i === last ? { ...x, content } : x)) : kept;
       });
     }
 
@@ -507,7 +617,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     }
     const code = codeSupported();
     const common = { provider: generationProvider, homeProvider: provider, modelId, mode: chatSettings.mode, courseOnly: chatSettings.courseOnly, web: Boolean(chatSettings.web), code, voice: opts.voice || undefined, folder: link ? { name: link.name } : undefined };
-    let body: object = { ...common, content, retry, attachmentIds, conversationId: convId, projectId: active ? undefined : filter };
+    let body: object = { ...common, content, retry, ...(opts.edit ? { edit: true } : {}), attachmentIds, conversationId: convId, projectId: active ? undefined : filter };
     const steps: Step[] = [];
     const dataCache = new Map<string, RunFile>(); // data files downloaded once per reply
     try {
@@ -556,7 +666,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
             else if (ev.t === "done") {
               // Same shape as a reloaded message: [] = files were searched but none used, undefined = no files involved.
               patchReply((m) => ({
-                ...m, status: ev.status === "partial" ? "partial" : "complete", sources: ev.grounding === "none" ? undefined : ev.sources,
+                ...m, status: ev.status === "partial" ? "partial" : "complete", finishReason:ev.finishReason, sources: ev.grounding === "none" ? undefined : ev.sources,
                 ...(typeof ev.content === "string" ? { content: ev.content } : {}), // the saved text (quiz/memory lines removed)
                 ...(Array.isArray(ev.remembered) && ev.remembered.length ? { remembered: ev.remembered.map((r: { content: string }) => r.content) } : {}),
               }));
@@ -844,6 +954,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
   const tools = (
     <ToolsMenu
       onUpload={() => fileInput.current?.click()}
+      cloud={cloudSources}
       imageLabel={imageModel?.label ?? null} imageMode={imageMode} onImageMode={setImageMode}
       mode={chatSettings.mode} onMode={(m) => setChatSettings({ mode: m })}
       courseOnly={chatSettings.courseOnly} onCourseOnly={(v) => setChatSettings({ courseOnly: v, ...(v ? { web: false } : {}) })}
@@ -970,6 +1081,11 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
               <path d="M11.5 4.5H5.5a1.5 1.5 0 0 0-1.5 1.5v8.5A1.5 1.5 0 0 0 5.5 16H14a1.5 1.5 0 0 0 1.5-1.5v-6M13.6 3.4a1.4 1.4 0 0 1 2 2L10 11l-2.6.6.6-2.6 5.6-5.6z" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
             New chat
+          </button>
+          <button onClick={() => { setSearchOpen(true); setSidebarOpen(false); }} className={`flex w-full items-center gap-3 px-3 py-2.5 text-left text-[15px] transition hover:bg-surface-200 ${theme.itemClass}`}>
+            <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden><circle cx="9" cy="9" r="5.25" fill="none" stroke="currentColor" strokeWidth="1.5" /><path d="M13 13l3.5 3.5" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" /></svg>
+            Search chats
+            <kbd className="ml-auto hidden font-sans text-xs text-ink-subtle md:inline">{isMac ? "⌘K" : "Ctrl K"}</kbd>
           </button>
         </div>
 
@@ -1147,12 +1263,35 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                 )}
               </div>
             )}
-            <h1 className={`mb-8 text-center ${theme.greetingClass}`}>{imageMode ? "What should I create?" : chatSettings.mode === "quiz" ? "What should I quiz you on?" : chatSettings.mode === "hints" ? "What are you working on?" : chatSettings.mode === "explain" ? "What should I explain?" : theme.greeting}</h1>
+            <h1 className={`mb-8 flex items-center justify-center gap-3 text-center ${theme.greetingClass}`}>
+              {theme.greetingLogo && !imageMode && chatSettings.mode === "chat" && <span className="shrink-0"><ProviderLogo provider={provider} size={32} /></span>}
+              <span>{imageMode ? "What should I create?" : chatSettings.mode === "quiz" ? "What should I quiz you on?" : chatSettings.mode === "hints" ? "What are you working on?" : chatSettings.mode === "explain" ? "What should I explain?" : firstName && theme.greetingFor ? theme.greetingFor(firstName, new Date().getHours()) : theme.greeting}</span>
+            </h1>
             {composer}
+            {!imageMode && !input.trim() && pending.length === 0 && (
+              <div className="no-scrollbar -mx-4 mt-5 flex min-w-0 max-w-[100vw] gap-2 self-stretch overflow-x-auto px-4 sm:mx-0 sm:flex-wrap sm:justify-center sm:overflow-visible sm:px-0">
+                {STARTERS.map((st) => (
+                  <button key={st.label} type="button" className={`inline-flex shrink-0 items-center gap-2 whitespace-nowrap transition ${theme.chipClass}`}
+                    onClick={() => {
+                      if (st.mode) setChatSettings({ mode: st.mode });
+                      if (st.upload) fileInput.current?.click();
+                      setInput(st.text);
+                      requestAnimationFrame(() => {
+                        const el = document.querySelector<HTMLTextAreaElement>("textarea[data-composer]");
+                        el?.focus();
+                        el?.setSelectionRange(st.text.length, st.text.length);
+                      });
+                    }}>
+                    <span aria-hidden className="text-[15px] leading-none">{st.icon}</span>
+                    {st.label}
+                  </button>
+                ))}
+              </div>
+            )}
           </div>
         ) : (
           <>
-            <div className="flex-1 overflow-y-auto">
+            <div ref={scrollRef} onScroll={onThreadScroll} className="relative flex-1 overflow-y-auto">
               <div className="mx-auto max-w-3xl px-4 py-6">
                 {active && (dropped[active.id] || chatSettings.summarized) && (
                   <p className="mb-6 rounded-xl bg-surface-200 px-4 py-2.5 text-center text-xs text-ink-muted">
@@ -1169,7 +1308,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                     const switched = m.role === "assistant" && m.kind === "text" && model && prevReply?.modelId && prevReply.modelId !== m.modelId;
                     if (m.role === "user") {
                       return (
-                        <li key={m.id} className="flex flex-col items-end gap-2">
+                        <li key={m.id} className="group flex flex-col items-end gap-2">
                           {m.attachments && m.attachments.length > 0 && (
                             <div className="flex max-w-[80%] flex-wrap justify-end gap-2">
                               {m.attachments.map((a) => <FileChip key={a.id} name={a.name} kind={a.kind} state={a.status} detail={a.error ?? undefined} />)}
@@ -1184,12 +1323,36 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                               </button>
                             );
                           })()}
-                          {m.content && <div className={`max-w-[80%] whitespace-pre-wrap leading-relaxed ${theme.userBubbleClass}`}>{m.content}</div>}
+                          {m.content && (editing?.id === m.id ? (
+                            <form className={`w-full max-w-[80%] ${theme.userBubbleClass}`} onSubmit={(e) => { e.preventDefault(); const t = editing.text.trim(); setEditing(null); if (t && t !== m.content) void send(t, true, { edit: true }); }}>
+                              <textarea autoFocus value={editing.text} onChange={(e) => setEditing({ id: m.id, text: e.target.value })} rows={Math.min(10, editing.text.split("\n").length + 1)} aria-label="Edit message"
+                                onKeyDown={(e) => { if (e.key === "Escape") setEditing(null); if (e.key === "Enter" && !e.shiftKey && !e.nativeEvent.isComposing) { e.preventDefault(); e.currentTarget.form?.requestSubmit(); } }}
+                                className="block w-full resize-none bg-transparent leading-relaxed outline-none" />
+                              <div className="mt-2 flex justify-end gap-2">
+                                <button type="button" onClick={() => setEditing(null)} className="rounded-full border border-line-strong bg-surface-000 px-3.5 py-1.5 text-sm font-medium hover:bg-surface-200">Cancel</button>
+                                <button type="submit" className="rounded-full bg-brand px-3.5 py-1.5 text-sm font-medium text-on-brand">Send</button>
+                              </div>
+                            </form>
+                          ) : (
+                            <>
+                              <div className={`max-w-[80%] whitespace-pre-wrap leading-relaxed ${theme.userBubbleClass}`}>{m.content}</div>
+                              <div className="-mt-1 flex gap-0.5 opacity-0 transition-opacity focus-within:opacity-100 group-hover:opacity-100 max-md:opacity-100">
+                                <CopyAnswer text={m.content} />
+                                {idx === thread.map((x) => x.role).lastIndexOf("user") && active && !busy && m.kind === "text" && (
+                                  <button type="button" onClick={() => setEditing({ id: m.id, text: m.content })} aria-label="Edit message" title="Edit message"
+                                    className="grid h-8 w-8 place-items-center rounded-lg text-ink-muted transition hover:bg-surface-200 hover:text-ink">
+                                    <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden><path d="M10.8 2.7l2.5 2.5L6 12.5l-3.2.7.7-3.2zM9.5 4l2.5 2.5" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" /></svg>
+                                  </button>
+                                )}
+                              </div>
+                            </>
+                          ))}
                         </li>
                       );
                     }
                     return (
-                      <li key={m.id}>
+                      <li key={m.id} className="relative">
+                        {theme.replyAvatar && m.kind === "text" && <span aria-hidden className="absolute -left-11 top-0.5 hidden lg:block"><ProviderLogo provider={provider} size={26} /></span>}
                         {switched && (
                           <div role="separator" className="mb-4 flex items-center gap-3 text-xs text-ink-subtle">
                             <span className="h-px flex-1 bg-line" />
@@ -1197,9 +1360,10 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                             <span className="h-px flex-1 bg-line" />
                           </div>
                         )}
-                        <div className="mb-1.5 text-xs font-medium text-ink-subtle">
-                          {m.kind === "image" || m.modelId?.endsWith("-image") ? (imageModel?.label ?? "Image") : model?.label}
-                        </div>
+                        {/* Like the apps, text replies carry no name tag (a model switch shows a divider above); images say which model drew them. */}
+                        {(m.kind === "image" || m.modelId?.endsWith("-image")) && (
+                          <div className="mb-1.5 text-xs font-medium text-ink-subtle">{imageModel?.label ?? "Image"}</div>
+                        )}
                         {m.kind === "image" ? (
                           m.status === "streaming" ? (
                             <div className="grid aspect-square w-full max-w-sm animate-pulse place-items-center rounded-2xl bg-surface-200 text-sm text-ink-subtle">Creating image…</div>
@@ -1212,11 +1376,13 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                             <p className="text-sm text-ink-subtle">Image unavailable.</p>
                           )
                         ) : (
-                          <div className={`whitespace-pre-wrap ${theme.replyClass}`}>
-                            <AnswerText text={m.content} sources={m.sources} final={m.status !== "streaming"} />
-                            {m.status === "streaming" && <span aria-label="Writing" className="orbit-caret ml-0.5 inline-block h-4 w-1.5 rounded-sm bg-ice align-middle" />}
-                            {m.status === "partial" && <span className="ml-1 text-xs text-ink-subtle">[stopped]</span>}
+                          <div className={`${theme.replyClass} ${m.status === "streaming" ? "md-streaming" : ""}`} aria-busy={m.status === "streaming"}>
+                            {m.content ? <Markdown text={m.content} sources={m.sources} final={m.status !== "streaming"} /> : m.status === "streaming" && <span aria-label="Writing" className="orbit-caret inline-block h-3 w-3 rounded-full bg-ink align-middle" />}
+                            {m.status === "partial" && <span className="ml-1 text-xs text-ink-subtle">{m.finishReason==="length"?"[Reply reached its output limit]":"[Incomplete reply]"}</span>}
                           </div>
+                        )}
+                        {m.kind==="text" && m.status==="partial" && m.finishReason==="length" && idx===thread.length-1 && (
+                          <button onClick={()=>send("Continue your previous reply from where it stopped, without repeating the completed parts.")} disabled={busy} className="mt-2 text-sm font-medium text-ink-muted underline underline-offset-[3px]">Continue reply</button>
                         )}
                         {m.activity && m.activity.length > 0 && (
                           <FolderActivity items={m.activity} onDecide={(id, ok) => approvals.current.get(id)?.(ok)} onRun={codeOk ? rerunPython : undefined} />
@@ -1232,9 +1398,16 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                           </p>
                         )}
                         {m.kind === "text" && (m.status === "complete" || m.status === "partial") && m.content.trim() && (
-                          <div className="mt-2 -ml-2.5 flex items-center gap-1">
-                            <ExportMenu options={answerOptions(m, idx)} />
-                            <SpeakButton id={m.id} text={cleanAnswer(m.content, m.sources)} />
+                          <div className="mt-1.5 -ml-1.5 flex items-center gap-0.5">
+                            <CopyAnswer text={normalizeMath(cleanAnswer(m.content, m.sources)).replace(/\s?\[[SW]\d+\]/g, "")} />
+                            <SpeakButton compact id={m.id} text={cleanAnswer(m.content, m.sources)} />
+                            <ExportMenu compact options={answerOptions(m, idx)} />
+                            {idx === thread.length - 1 && m.status === "complete" && (
+                              <button type="button" onClick={() => send("", true)} disabled={busy} aria-label="Regenerate" title="Regenerate"
+                                className="grid h-8 w-8 place-items-center rounded-lg text-ink-muted transition hover:bg-surface-200 hover:text-ink disabled:opacity-40">
+                                <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden><path d="M13 8a5 5 0 1 1-1.5-3.55M13 2.5v2.8h-2.8" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                              </button>
+                            )}
                           </div>
                         )}
                         {m.kind === "text" && m.status === "complete" && /couldn.t find this in your course files/i.test(m.content) ? (
@@ -1260,7 +1433,15 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                 <div ref={bottomRef} />
               </div>
             </div>
-            <div className="px-3 pb-1">{composer}</div>
+            <div className="relative px-3 pb-1">
+              {awayFromBottom && (
+                <button type="button" onClick={() => toBottom()} aria-label="Scroll to bottom"
+                  className="absolute -top-12 left-1/2 z-10 grid h-9 w-9 -translate-x-1/2 place-items-center rounded-full border border-line bg-surface-000 text-ink shadow-menu transition hover:bg-surface-200">
+                  <svg viewBox="0 0 16 16" width="16" height="16" aria-hidden><path d="M8 3v10m0 0-4-4m4 4 4-4" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" /></svg>
+                </button>
+              )}
+              {composer}
+            </div>
           </>
         )}
         <p className="px-4 pb-3 pt-2 text-center text-xs text-ink-muted">
@@ -1298,6 +1479,18 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
           hint={activeProject?.name}
         />
       )}
+      <SearchChats open={searchOpen} onClose={() => setSearchOpen(false)} appName={theme.appName} onNew={newChat}
+        chats={(appConvs ?? []).map((c) => ({ id: c.id, title: c.title, updatedAt: c.updatedAt }))} onOpen={(id) => setActive(id)} />
+      <MailDialog target={mailTarget} onClose={() => setMailTarget(null)} onPicked={(files) => void attachFiles(files)} />
+      <NotionDialog open={appOpen === "notion"} onClose={() => setAppOpen(null)} onPicked={(files) => void attachFiles(files)} />
+      <ZoteroDialog open={appOpen === "zotero"} onClose={() => setAppOpen(null)} onPicked={(files) => void attachFiles(files)} />
+      <YouTubeDialog open={appOpen === "youtube"} onClose={() => setAppOpen(null)} isGemini={provider === "google"}
+        onAdd={(url) => {
+          if (provider !== "google") pickProvider("google");
+          setInput((prev) => (provider === "google" && prev.trim() ? `${prev.trimEnd()}\n${url}\n` : `${url}\n`));
+        }} />
+      <GitHubDialog open={githubOpen} onClose={() => setGithubOpen(false)} onPicked={(files) => void attachFiles(files)} />
+      <OneDriveDialog open={oneDriveOpen} onClose={() => setOneDriveOpen(false)} onPicked={(files) => void attachFiles(files)} />
       <SettingsDialog
         open={settingsOpen !== null}
         tab={settingsOpen ?? undefined}
@@ -1306,6 +1499,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
         appName={theme.appName}
         courses={projects[provider]}
         memoryVersion={memoryVersion}
+        onImported={(p) => setConvs((prev) => ({ ...prev, [p]: null }))} // null = reload that app's chat list (now with the imported chats)
         onOpenCourse={(id) => {
           const p = projects[provider].find((x) => x.id === id);
           setSettingsOpen(null);

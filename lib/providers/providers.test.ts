@@ -75,7 +75,7 @@ describe("adapters", () => {
     const fetchMock = vi.fn(async () => sseResponse([
       `event: message_start\ndata: ${JSON.stringify({ type: "message_start", message: { usage: { input_tokens: 7, cache_read_input_tokens: 3, output_tokens: 1 } } })}`,
       `event: content_block_delta\ndata: ${JSON.stringify({ type: "content_block_delta", delta: { type: "text_delta", text: "Hi" } })}`,
-      `event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", usage: { output_tokens: 9 } })}`,
+      `event: message_delta\ndata: ${JSON.stringify({ type: "message_delta", delta:{stop_reason:"end_turn"}, usage: { output_tokens: 9 } })}`,
       `event: message_stop\ndata: ${JSON.stringify({ type: "message_stop" })}`,
     ]));
     vi.stubGlobal("fetch", fetchMock);
@@ -88,7 +88,7 @@ describe("adapters", () => {
   it("google: maps assistant→model, skips thoughts, bills thinking as output", async () => {
     const fetchMock = vi.fn(async () => sseResponse([
       `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "hmm", thought: true }, { text: "A" }] } }] })}`,
-      `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "B" }] } }], usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 2, thoughtsTokenCount: 3 } })}`,
+      `data: ${JSON.stringify({ candidates: [{ finishReason:"STOP", content: { parts: [{ text: "B" }] } }], usageMetadata: { promptTokenCount: 4, candidatesTokenCount: 2, thoughtsTokenCount: 3 } })}`,
     ]));
     vi.stubGlobal("fetch", fetchMock);
     expect(await collect(google.stream(args()))).toEqual({ text: "AB", usage: { input: 4, output: 5, reasoning: 3, cached: 0 } });
@@ -99,7 +99,7 @@ describe("adapters", () => {
   it("xai: OpenAI-style chunks with usage", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => sseResponse([
       `data: ${JSON.stringify({ choices: [{ delta: { content: "G" } }] })}`,
-      `data: ${JSON.stringify({ choices: [], usage: { prompt_tokens: 3, completion_tokens: 2, completion_tokens_details: { reasoning_tokens: 1 } } })}`,
+      `data: ${JSON.stringify({ choices: [{finish_reason:"stop"}], usage: { prompt_tokens: 3, completion_tokens: 2, completion_tokens_details: { reasoning_tokens: 1 } } })}`,
       "data: [DONE]",
     ])));
     expect(await collect(xai.stream(args()))).toEqual({ text: "G", usage: { input: 3, output: 3, reasoning: 1, cached: 0 } });
@@ -172,6 +172,7 @@ describe("folder tools", () => {
       `data: ${JSON.stringify({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: '{"pa' } })}`,
       `data: ${JSON.stringify({ type: "content_block_delta", index: 1, delta: { type: "input_json_delta", partial_json: 'th":"b.md"}' } })}`,
       `data: ${JSON.stringify({ type: "content_block_stop", index: 1 })}`,
+      `data: ${JSON.stringify({type:"message_delta",delta:{stop_reason:"tool_use"},usage:{output_tokens:1}})}`,
       `data: ${JSON.stringify({ type: "message_stop" })}`,
     ]);
     expect(calls).toEqual([{ id: "t2", name: "read_file", args: { path: "b.md" } }]);
@@ -182,7 +183,7 @@ describe("folder tools", () => {
 
   it("Gemini: functionDeclarations, returns thought signatures", async () => {
     const { calls, body } = await run(google, [
-      `data: ${JSON.stringify({ candidates: [{ content: { parts: [{ functionCall: { name: "read_file", args: { path: "b.md" } }, thoughtSignature: "s2" }] } }] })}`,
+      `data: ${JSON.stringify({ candidates: [{ finishReason:"STOP", content: { parts: [{ functionCall: { name: "read_file", args: { path: "b.md" } }, thoughtSignature: "s2" }] } }] })}`,
     ]);
     expect(calls[0]).toMatchObject({ name: "read_file", args: { path: "b.md" }, meta: { thoughtSignature: "s2", providerId: false } });
     expect(body.tools[0].functionDeclarations[0].name).toBe("read_file");
@@ -198,6 +199,7 @@ describe("folder tools", () => {
     const { calls, body } = await run(xai, [
       chunk({ index: 0, id: "x1", function: { name: "read_file", arguments: '{"path":' } }),
       chunk({ index: 0, function: { arguments: '"b.md"}' } }),
+      `data: ${JSON.stringify({choices:[{finish_reason:"tool_calls"}]})}`,
       "data: [DONE]",
     ]);
     expect(calls).toEqual([{ id: "x1", name: "read_file", args: { path: "b.md" } }]);
@@ -214,7 +216,7 @@ describe("folder tools", () => {
 
 describe("voice: think less so replies start sooner", () => {
   afterEach(() => vi.unstubAllGlobals());
-  const done = () => sseResponse([`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "ok" })}`]);
+  const done = () => sseResponse([`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "ok" })}`, `data: ${JSON.stringify({ type: "response.completed", response: {} })}`]);
   const bodyOf = (m: ReturnType<typeof vi.fn>, i: number) => JSON.parse((m.mock.calls[i] as unknown as [string, RequestInit])[1].body as string);
 
   it("openai asks for low reasoning effort, and asks normally if the model doesn't support it", async () => {
@@ -229,12 +231,24 @@ describe("voice: think less so replies start sooner", () => {
   });
 
   it("gemini asks for low thinking", async () => {
-    const fetchMock = vi.fn(async () => sseResponse([`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] } }] })}`]));
+    const fetchMock = vi.fn(async () => sseResponse([`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] })}`]));
     vi.stubGlobal("fetch", fetchMock);
     await collect(google.stream({ ...args(), fast: true }));
     expect(bodyOf(fetchMock, 0).generationConfig.thinkingConfig).toEqual({ thinkingLevel: "low" });
     await collect(google.stream(args()));
     expect(bodyOf(fetchMock, 1).generationConfig.thinkingConfig).toBeUndefined();
+  });
+
+  it("gemini watches YouTube links at low resolution", async () => {
+    const fetchMock = vi.fn(async () => sseResponse([`data: ${JSON.stringify({ candidates: [{ content: { parts: [{ text: "ok" }] }, finishReason: "STOP" }] })}`]));
+    vi.stubGlobal("fetch", fetchMock);
+    const url = "https://www.youtube.com/watch?v=dQw4w9WgXcQ";
+    await collect(google.stream({ ...args(), history: [{ role: "user", content: `Summarize ${url}`, videos: [url] }] }));
+    const body = bodyOf(fetchMock, 0);
+    expect(body.contents[0].parts).toEqual([{ fileData: { fileUri: url } }, { text: `Summarize ${url}` }]);
+    expect(body.generationConfig.mediaResolution).toBe("MEDIA_RESOLUTION_LOW");
+    await collect(google.stream(args()));
+    expect(bodyOf(fetchMock, 1).generationConfig.mediaResolution).toBeUndefined();
   });
 });
 
@@ -250,7 +264,7 @@ describe("key names", () => {
 describe("openai optional settings", () => {
   afterEach(() => vi.unstubAllGlobals());
   it("keeps prompt_cache_key within 64 characters and retries a 400 without optional settings", async () => {
-    const ok = () => sseResponse([`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "ok" })}`]);
+    const ok = () => sseResponse([`data: ${JSON.stringify({ type: "response.output_text.delta", delta: "ok" })}`, `data: ${JSON.stringify({ type: "response.completed", response: {} })}`]);
     const fetchMock = vi.fn().mockResolvedValueOnce(new Response("bad", { status: 400 })).mockResolvedValueOnce(ok());
     vi.stubGlobal("fetch", fetchMock);
     expect((await collect(openai.stream({ ...args(), cacheKey: "x".repeat(80) }))).text).toBe("ok");

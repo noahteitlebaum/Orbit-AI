@@ -1,5 +1,5 @@
 import { readSse } from "./sse";
-import { errorForStatus, normalizeTurns, parseArgs, ProviderError, type ChatTurn, type ProviderAdapter } from "./types";
+import { errorForStatus, normalizeTurns, parseArgs, ProviderError, type FinishReason, type ChatTurn, type ProviderAdapter } from "./types";
 
 // Anthropic Messages API (streaming, tool use). Claude has no image generation.
 
@@ -56,6 +56,7 @@ export const anthropic: ProviderAdapter = {
     let cached = 0;
     let cacheWrite = 0;
     let output = 0;
+    let finish:FinishReason="unknown";
     const blocks = new Map<number, { id: string; name: string; json: string }>(); // tool_use blocks being streamed
     for await (const { data } of readSse(res.body)) {
       const ev = JSON.parse(data);
@@ -88,13 +89,16 @@ export const anthropic: ProviderAdapter = {
         }
         case "message_delta":
           if (ev.usage?.output_tokens != null) output = ev.usage.output_tokens;
+          if(ev.delta?.stop_reason) finish=ev.delta.stop_reason==="max_tokens"?"length":ev.delta.stop_reason==="refusal"?"blocked":ev.delta.stop_reason==="tool_use"?"tool_calls":["end_turn","stop_sequence"].includes(ev.delta.stop_reason)?"stop":"unknown";
           break;
         case "message_stop":
           yield { usage: { input, output, reasoning: 0, cached, cacheWrite, reasoningReported: false } };
+          yield {finish};
           return;
         case "error":
           throw new ProviderError(ev.error?.type === "overloaded_error" ? "unavailable" : "unknown", undefined, true);
       }
     }
+    throw new ProviderError("incomplete_stream",undefined,true);
   },
 };

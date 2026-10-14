@@ -91,51 +91,64 @@ export async function gatherMaterial(
     return true;
   };
 
-  // 1. Small chat attachments are sent whole (newest first) — "summarize this" has no keywords to search for.
-  const small = ready
-    .filter((f) => f.conversation_id === opts.conversationId && (f.char_count ?? 0) <= SMALL_FILE_CHARS)
-    .sort((a, b) => Number(opts.newAttachmentIds.includes(b.id)) - Number(opts.newAttachmentIds.includes(a.id)));
-  for (const f of small) {
-    const { data: chunks } = await supabase.from("file_chunks").select("file_id, page, chunk_index, content").eq("file_id", f.id).order("chunk_index");
-    for (const c of (chunks ?? []) as ChunkRow[]) if (!take(c)) break;
+  // Rank evidence for THIS question before filling space with older attachments.
+  const directNamed = namedFiles(opts.question, ready);
+  const followUp = /^(?:and\b|what about\b|why\b|how so\b|explain (?:that|this)\b|(?:the )?(?:first|second|third) (?:one|part)\b)/i.test(opts.question.trim());
+  const referenceQuestion = directNamed.length ? opts.question : followUp && opts.previousQuestion ? opts.previousQuestion : opts.question;
+  const named = directNamed.length ? directNamed : followUp ? namedFiles(referenceQuestion,ready) : [];
+  const explicitPages = mentionedPages(opts.question);
+  const pages = explicitPages.length ? explicitPages : followUp ? mentionedPages(referenceQuestion) : [];
+  const small = ready.filter(f=>f.conversation_id===opts.conversationId && (f.char_count??0)<=SMALL_FILE_CHARS);
+  const query = followUp && opts.previousQuestion ? `${opts.previousQuestion}\n${opts.question}` : opts.question;
+
+  // 1. Explicit file/page references, including a follow-up to a scanned page with no searchable text.
+  for(const f of named) {
+    let rows:ChunkRow[]=[];
+    if(pages.length) {
+      const {data:d}=await supabase.from("file_chunks").select("file_id, page, chunk_index, content").eq("file_id",f.id).in("page",pages).order("chunk_index");
+      rows=(d??[]) as ChunkRow[];
+    } else {
+      const {data:d}=await supabase.rpc("search_chunks",{p_query:query,p_file_ids:[f.id],p_limit:6});
+      rows=(d??[]) as ChunkRow[];
+    }
+    if(!rows.length && !pages.length) {
+      const {data:d}=await supabase.from("file_chunks").select("file_id, page, chunk_index, content").eq("file_id",f.id).order("chunk_index").limit(4);
+      rows=(d??[]) as ChunkRow[];
+    }
+    for(const c of rows) if(!take(c)) break;
+    if(pages.length && !rows.length && !(f.visual_pages??[]).some(p=>pages.includes(p))) notes.push(`${f.name}: requested ${describePages(pages)} could not be found in the indexed material. Do not substitute another page and claim it is the requested one.`);
   }
 
-  // 2. Files the question names ("lecture 3", "the assignment 2 spec", "page 12 of week4.pdf"): that page,
-  //    else the best matches in that file, else its opening passages.
-  const searchIds = ready.filter((f) => !small.includes(f)).map((f) => f.id);
-  const named = namedFiles(opts.question, ready.filter((f) => !small.includes(f)));
-  const pages = mentionedPages(opts.question);
-  for (const f of named) {
-    let rows: ChunkRow[] = [];
-    if (pages.length) {
-      const { data: d } = await supabase.from("file_chunks").select("file_id, page, chunk_index, content").eq("file_id", f.id).in("page", pages).order("chunk_index");
-      rows = (d ?? []) as ChunkRow[];
-    }
-    if (!rows.length) {
-      const { data: d } = await supabase.rpc("search_chunks", { p_query: opts.question, p_file_ids: [f.id], p_limit: 6 });
-      rows = (d ?? []) as ChunkRow[];
-    }
-    if (!rows.length) {
-      const { data: d } = await supabase.from("file_chunks").select("file_id, page, chunk_index, content").eq("file_id", f.id).order("chunk_index").limit(4);
-      rows = (d ?? []) as ChunkRow[];
-    }
-    for (const c of rows) if (!take(c)) break;
+  // 2. New small attachments: generic requests such as "summarize this" need their contents.
+  for(const f of small.filter(f=>opts.newAttachmentIds.includes(f.id) && (!named.length || (named.includes(f) && !pages.length)))) {
+    const {data:chunks}=await supabase.from("file_chunks").select("file_id, page, chunk_index, content").eq("file_id",f.id).order("chunk_index");
+    for(const c of (chunks??[]) as ChunkRow[]) if(!take(c)) break;
   }
 
-  // 3. Keyword search across the rest (course files and big attachments). A follow-up with no keywords of its own
-  //    ("what about the second one?") searches with the previous question too.
-  if (searchIds.length && opts.question.trim()) {
-    const search = async (q: string) => ((await supabase.rpc("search_chunks", { p_query: q, p_file_ids: searchIds, p_limit: 10 })).data ?? []) as ChunkRow[];
-    let hits = await search(opts.question);
-    if (!hits.length && opts.previousQuestion?.trim()) hits = await search(`${opts.previousQuestion}\n${opts.question}`);
-    for (const c of hits) if (!take(c)) break;
+  // 3. Relevant passages before unrelated old attachments; preserve topic on short follow-ups.
+  const searchIds=(named.length?named:ready).map(f=>f.id);
+  if(searchIds.length && query.trim()) {
+    const {data:hits}=await supabase.rpc("search_chunks",{p_query:query,p_file_ids:searchIds,p_limit:10});
+    for(const c of (hits??[]) as ChunkRow[]) {
+      if(named.length && pages.length && !pages.includes(c.page??-1)) continue;
+      if(!take(c)) break;
+    }
   }
 
-  // 4. A big file attached just now with no keyword hits: send its opening passages so the model sees it.
-  for (const id of opts.newAttachmentIds) {
-    if (!byId.has(id) || picked.some((c) => c.file_id === id)) continue;
-    const { data: chunks } = await supabase.from("file_chunks").select("file_id, page, chunk_index, content").eq("file_id", id).order("chunk_index").limit(6);
-    for (const c of (chunks ?? []) as ChunkRow[]) if (!take(c)) break;
+  // 4. A just-attached large file without hits: disclose that only its opening passages are included.
+  for(const id of opts.newAttachmentIds) {
+    if((named.length && pages.length) || !byId.has(id) || picked.some(c=>c.file_id===id) || (named.length && !named.some(f=>f.id===id))) continue;
+    const {data:chunks}=await supabase.from("file_chunks").select("file_id, page, chunk_index, content").eq("file_id",id).order("chunk_index").limit(6);
+    for(const c of (chunks??[]) as ChunkRow[]) if(!take(c)) break;
+    notes.push(`${byId.get(id)!.name}: only the opening passages were included because the question had no indexed matches. Do not claim to have reviewed the entire file.`);
+  }
+
+  // 5. A generic reference to a previously attached small file, only when no named/relevant passages were found.
+  if(!picked.length && !named.length) {
+    for(const f of small) {
+      const {data:chunks}=await supabase.from("file_chunks").select("file_id, page, chunk_index, content").eq("file_id",f.id).order("chunk_index");
+      for(const c of (chunks??[]) as ChunkRow[]) if(!take(c)) break;
+    }
   }
 
   // Keep document order within each file so passages read naturally.
@@ -147,7 +160,7 @@ export async function gatherMaterial(
   const blocks = picked.map((c, i) => `[S${i + 1}] ${sources[i].label}\n${c.content}`);
 
   // Visual pages: scanned pages and pages with diagrams/pictures, from the files this question touches.
-  const wanted = pickVisualPages(ready, picked, small, opts);
+  const wanted = pickVisualPages(ready, picked, small, {...opts, referencedFileIds:named.map(f=>f.id), requestedPages:pages});
   const documents: TurnDocument[] = [];
   let visualTokens = 0;
   for (const { file, pages, skipped } of wanted) {
@@ -198,13 +211,15 @@ export function nameTokens(text: string): string[] {
  * — if the file name has a number (Lecture 3, Assignment 2) — that same number. "lecture 4" doesn't match Lecture 3.
  */
 export function namedFiles<T extends { name: string }>(question: string, files: T[]): T[] {
-  const q = new Set(nameTokens(question));
+  const questionTokens=nameTokens(question);
+  const q = new Set(questionTokens);
   const isNum = (w: string) => /^\d+$/.test(w);
   return files.filter((f) => {
     const words = nameTokens(f.name.replace(/\.[a-z0-9]+$/i, "")).filter((w) => !GENERIC.has(w));
     const nums = words.filter(isNum);
     const named = words.filter((w) => !isNum(w) && w.length >= 3).some((w) => q.has(w));
-    return named && (nums.length === 0 || nums.some((n) => q.has(n)));
+    return named && (nums.length===0 || questionTokens.some((w,i)=>words.includes(w) && !isNum(w)
+      && nums.some(n=>questionTokens[i+1]===n || questionTokens[i-1]===n)));
   });
 }
 
@@ -227,15 +242,16 @@ function describePages(pages: number[]): string {
 }
 
 /**
- * Which visual pages to send, newest attachments first, at most MAX_VISUAL_PAGES:
+ * Which visual pages to send, named files before newest attachments, at most MAX_VISUAL_PAGES:
  * every visual page of small attachments (sent whole) and scanned attachments (no text to search), plus the
  * visual pages of the passages picked by search. Scanned course files can't be searched; they're named in a note.
  */
 export function pickVisualPages(
   ready: FileRow[], picked: { file_id: string; page: number | null }[], small: FileRow[],
-  opts: { conversationId: string; newAttachmentIds: string[] },
+  opts: { conversationId: string; newAttachmentIds: string[]; referencedFileIds?: string[]; requestedPages?: number[] },
 ): { file: FileRow; pages: number[]; skipped: number[] }[] {
-  const order = [...ready].sort((a, b) => Number(opts.newAttachmentIds.includes(b.id)) - Number(opts.newAttachmentIds.includes(a.id)));
+  const order = [...ready].sort((a, b) => Number(opts.referencedFileIds?.includes(b.id)) - Number(opts.referencedFileIds?.includes(a.id))
+    || Number(opts.newAttachmentIds.includes(b.id)) - Number(opts.newAttachmentIds.includes(a.id)));
   let left = MAX_VISUAL_PAGES;
   const out: { file: FileRow; pages: number[]; skipped: number[] }[] = [];
   for (const f of order) {
@@ -244,7 +260,11 @@ export function pickVisualPages(
     if (!visual.length) continue;
     const isAttachment = f.conversation_id === opts.conversationId;
     const whole = isAttachment && (small.includes(f) || f.status === "needs_ocr");
-    const relevant = whole ? visual : visual.filter((p) => picked.some((c) => c.file_id === f.id && c.page === p));
+    const explicitlyReferenced=opts.referencedFileIds?.includes(f.id);
+    if (opts.referencedFileIds?.length && !explicitlyReferenced) continue;
+    const relevant = explicitlyReferenced && opts.requestedPages?.length
+      ? visual.filter(p=>opts.requestedPages!.includes(p))
+      : whole ? visual : visual.filter(p=>picked.some(c=>c.file_id===f.id && c.page===p));
     if (!relevant.length) continue;
     const pages = relevant.slice(0, Math.max(0, left));
     left -= pages.length;

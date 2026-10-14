@@ -138,6 +138,17 @@ describe("POST /api/chat", () => {
     expect(msgs.filter((m) => m.role === "assistant").map((m) => m.status)).toEqual(["complete"]);
   });
 
+  it("edit rewrites the last question and answers it again", async () => {
+    state.live = true;
+    const first = await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "what is 2+2" })));
+    const conversationId = first[0].conversationId;
+    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", conversationId, retry: true, edit: true, content: "what is 3+3" })));
+    const msgs = state.fake!.db.messages;
+    expect(msgs.filter((m) => m.role === "user").map((m) => m.content)).toEqual(["what is 3+3"]);
+    expect(msgs.filter((m) => m.role === "assistant")).toHaveLength(1);
+    expect(state.lastArgs!.history.at(-1)!.content).toBe("what is 3+3");
+  });
+
   it("continues the same saved chat after explicitly switching provider", async () => {
     const first = await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "q" })));
     const res = await POST(req({ provider: "openai", modelId: "openai-default", content: "q2", conversationId: first[0].conversationId }));
@@ -411,9 +422,9 @@ describe("persistent chats and model switching", () => {
     expect(conv.summary_upto as number).toBeGreaterThan(-1000);
 
     // A short chat with an old summary doesn't send it (everything fits).
-    state.fake!.db.conversations.push({ id: "22222222-2222-4222-8222-222222222222", user_id: "user-1", provider: "anthropic", title: "s", project_id: null, mode: "chat", course_only: false, summary: "stale", summary_upto: 1 });
+    state.fake!.db.conversations.push({ id: "22222222-2222-4222-8222-222222222222", user_id: "user-1", provider: "anthropic", title: "s", project_id: null, mode: "chat", course_only: false, summary: "OLDER SUMMARY SHOULD NOT BE SENT", summary_upto: 1 });
     await ask({ modelId: "anthropic-default", content: "hi", conversationId: "22222222-2222-4222-8222-222222222222" });
-    expect(state.lastArgs!.system).not.toContain("stale");
+    expect(state.lastArgs!.system).not.toContain("OLDER SUMMARY SHOULD NOT BE SENT");
   });
 });
 
@@ -487,5 +498,25 @@ describe("web search", () => {
     expect(fetchMock).not.toHaveBeenCalled();
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
+  });
+});
+
+describe("response completion quality",()=>{
+  it("saves a token-limited reply as partial, settles actual usage and does not save a truncated memory",async()=>{
+    state.live=true;
+    state.fake!.db.profiles=[{user_id:"user-1",memory_enabled:true}];
+    state.events=[{delta:"The calculation begins here.\n[[remember: Prefers SI units]]"},{usage:{input:10,output:5,reasoning:0,cached:0}},{finish:"length"}];
+    const events=await readEvents(await POST(req({provider:"anthropic",modelId:"anthropic-default",content:"Solve the physics problem"})));
+    expect(events.at(-1)).toMatchObject({t:"done",status:"partial",finishReason:"length"});
+    expect(state.fake!.db.messages.at(-1)?.status).toBe("partial");
+    expect(state.fake!.db.memories??[]).toHaveLength(0);
+    expect(budget.settle).toHaveBeenCalledWith(expect.any(String),"settled",70,expect.anything(),undefined,expect.objectContaining({finishReason:"length",qualityVersion:"student-v1"}));
+  });
+  it("does not execute a tool call whose output/arguments were cut off",async()=>{
+    state.live=true;
+    state.events=[{toolCall:{id:"cut",name:"run_python",args:{code:"print(1)"}}},{finish:"length"}];
+    const events=await readEvents(await POST(req({provider:"anthropic",modelId:"anthropic-default",content:"Calculate",code:true})));
+    expect(events.some(e=>e.t==="tool_calls")).toBe(false);
+    expect(events.at(-1)).toMatchObject({status:"partial"});
   });
 });

@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { AppLogo } from "./app-logos";
 
 export type StudyMode = "chat" | "explain" | "quiz" | "hints";
 export const MODE_LABELS: Record<StudyMode, { label: string; hint: string }> = {
@@ -11,8 +12,11 @@ export const MODE_LABELS: Record<StudyMode, { label: string; hint: string }> = {
 };
 
 // "+" menu in the message box: upload files, connect a folder, create an image, pick a study mode, limit answers to course files.
+export type ConnectedApp = { id: string; name: string; hint: string; onPick: () => void; group: "Files" | "Mail & calendar" | "Notes & research"; setup?: string };
+
 export function ToolsMenu(p: {
   onUpload: () => void;
+  cloud?: ConnectedApp[]; // GitHub, Google Drive, OneDrive, mail, calendars, Notion, Zotero, YouTube
   imageLabel: string | null; // null = this app can't make images
   imageMode: boolean;
   onImageMode: (on: boolean) => void;
@@ -28,6 +32,19 @@ export function ToolsMenu(p: {
   disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
+  const [view, setView] = useState<"main" | "apps">("main");
+  // Open upward when the box is low on the screen (in a chat), downward when it's high (empty chat), and never off-screen.
+  const [place, setPlace] = useState<{ up: boolean; max: number }>({ up: true, max: 560 });
+  function toggleOpen() {
+    const r = root.current?.getBoundingClientRect();
+    if (r) {
+      const above = r.top - 16, below = window.innerHeight - r.bottom - 16;
+      const up = above >= Math.min(480, below) || above >= 420;
+      setPlace({ up, max: Math.max(220, Math.min(560, up ? above : below)) });
+    }
+    setOpen((o) => !o);
+    setView("main");
+  }
   const root = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -47,7 +64,7 @@ export function ToolsMenu(p: {
 
   return (
     <div ref={root} className="relative flex items-center gap-1">
-      <button type="button" onClick={() => setOpen((o) => !o)} disabled={p.disabled} aria-haspopup="menu" aria-expanded={open} aria-label="Tools"
+      <button type="button" onClick={toggleOpen} disabled={p.disabled} aria-haspopup="menu" aria-expanded={open} aria-label="Tools"
         className={`grid h-9 w-9 place-items-center rounded-full text-ink-muted transition hover:bg-surface-300 hover:text-ink disabled:opacity-50 ${open ? "bg-surface-300 text-ink" : ""}`}>
         <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden className={`transition-transform ${open ? "rotate-45" : ""}`}>
           <path d="M8 3v10M3 8h10" fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
@@ -68,7 +85,34 @@ export function ToolsMenu(p: {
       {p.web && p.onWeb && <Chip onClear={() => p.onWeb!(false)} label="Web" icon={<GlobeIcon />} />}
 
       {open && (
-        <div role="menu" className="model-menu absolute bottom-full left-0 z-40 mb-2 w-80 origin-bottom-left rounded-2xl border border-line bg-composer p-1.5 shadow-menu">
+        <div role="menu" style={{ maxHeight: place.max }} className={`model-menu absolute left-0 z-40 w-80 overflow-y-auto rounded-2xl ${place.up ? "bottom-full mb-2 origin-bottom-left" : "top-full mt-2 origin-top-left"} border border-line bg-composer p-1.5 shadow-menu`}>
+          {view === "apps" ? (
+            <>
+              <div className="flex items-center gap-1 px-1 pb-1">
+                <button type="button" onClick={() => setView("main")} aria-label="Back" className="grid h-8 w-8 place-items-center rounded-lg text-ink-muted hover:bg-surface-300">‹</button>
+                <p className="text-sm font-medium">Add from apps</p>
+                <span className="ml-auto pr-2 text-[11px] text-ink-subtle">read-only</span>
+              </div>
+              {(["Files", "Mail & calendar", "Notes & research"] as const).map((g) => {
+                const apps = p.cloud!.filter((c) => c.group === g);
+                return apps.length ? (
+                  <div key={g}>
+                    <p className="px-3 pb-1 pt-2 text-xs font-medium text-ink-subtle">{g}</p>
+                    {apps.map((c) => (
+                      <button key={c.id} type="button" role="menuitem" className={item} disabled={Boolean(c.setup)} title={c.setup}
+                        onClick={() => { c.onPick(); setOpen(false); }}>
+                        <AppLogo id={c.id} />
+                        <span className="min-w-0 flex-1">
+                          <span className="block text-sm font-medium">{c.name}</span>
+                          <span className="block truncate text-xs text-ink-subtle">{c.setup ? "Not set up on this server" : c.hint}</span>
+                        </span>
+                      </button>
+                    ))}
+                  </div>
+                ) : null;
+              })}
+            </>
+          ) : (<>
           <button type="button" role="menuitem" className={item} onClick={() => { p.onUpload(); setOpen(false); }}>
             <span className={icon}><ClipIcon /></span>
             <span className="min-w-0 flex-1">
@@ -76,6 +120,16 @@ export function ToolsMenu(p: {
               <span className="block truncate text-xs text-ink-subtle">PDF, Word, PowerPoint, Excel, code, images…</span>
             </span>
           </button>
+          {!!p.cloud?.length && (
+            <button type="button" role="menuitem" aria-haspopup="menu" className={item} onClick={() => setView("apps")}>
+              <span className={icon}><AppsIcon /></span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-medium">Add from apps</span>
+                <span className="block truncate text-xs text-ink-subtle">GitHub, Drive, OneDrive, email, Notion, Zotero…</span>
+              </span>
+              <span aria-hidden className="text-ink-subtle">›</span>
+            </button>
+          )}
           {p.onFolder && (
             <button type="button" role="menuitem" className={item} onClick={() => { p.onFolder!(); setOpen(false); }}>
               <span className={icon}><FolderIcon /></span>
@@ -125,6 +179,7 @@ export function ToolsMenu(p: {
               </button>
             ))}
           </div>
+          </>)}
         </div>
       )}
     </div>
@@ -190,6 +245,14 @@ function GlobeIcon() {
     <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden>
       <circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" strokeWidth="1.3" />
       <path d="M2 8h12M8 2c1.8 1.7 2.6 3.7 2.6 6S9.8 12.3 8 14C6.2 12.3 5.4 10.3 5.4 8S6.2 3.7 8 2z" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function AppsIcon() {
+  return (
+    <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden>
+      {[[2.5, 2.5], [9, 2.5], [2.5, 9], [9, 9]].map(([x, y]) => <rect key={`${x}${y}`} x={x} y={y} width="4.5" height="4.5" rx="1.2" fill="none" stroke="currentColor" strokeWidth="1.3" />)}
     </svg>
   );
 }

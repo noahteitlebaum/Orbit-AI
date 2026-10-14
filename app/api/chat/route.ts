@@ -1,9 +1,11 @@
+import { RESPONSE_QUALITY_VERSION } from "@/config/quality";
 import { CONTEXT } from "@/config/context";
 import { trackEvent } from "@/lib/analytics/events";
 import { retrieveRelevant } from "@/lib/chat/retrieval";
 import { randomUUID, createHash } from "node:crypto";
 import { FOLDER_ACCESS, PDF_INPUT, getModel, isProvider } from "@/config/models";
 import { dbError, isUuid, json, requireAppUser } from "@/lib/api";
+import { youtubeLinks, YOUTUBE } from "@/lib/connectors/youtube";
 import { isProviderDisabled, overRateLimit, reserve, settle } from "@/lib/billing/budget";
 import { buildEconomicContext, economicInputBudget, costMicros, estimateTokens, maxOutputFor, reservationMicros, STUDY_MODES, systemPrompt, type StudyMode } from "@/lib/chat/context";
 import { citedSources, gatherMaterial, grounding, IMAGE_TOKENS, loadImages, MAX_IMAGES, stripInventedCitations, type Source } from "@/lib/chat/material";
@@ -12,14 +14,14 @@ import { WEB_SEARCH } from "@/config/search";
 import { domainOf, searchKey, searchQuery, webSearch, type WebResult } from "@/lib/search/web";
 import { applyResults, mergeQuiz, parseQuiz, quizContext, type QuizState } from "@/lib/chat/quiz";
 import { ADAPTERS, apiKeyFor, liveFor } from "@/lib/providers";
-import { ProviderError, type ChatTurn, type StreamEvent, type ToolCall, type Usage } from "@/lib/providers/types";
+import { ProviderError, type ChatTurn, type StreamEvent, type ToolCall, type Usage, type FinishReason } from "@/lib/providers/types";
 import { FOLDER_TOOLS, folderPrompt, MAX_CALLS_PER_STEP, MAX_TOOL_STEPS } from "@/lib/folder/tools";
 import { CODE_TOOLS, codePrompt } from "@/lib/code/tools";
 import { loadPersonal, relevantMemories, parseRemember, personalPrompt, saveMemories, type Memory } from "@/lib/profile/personal";
 import { parseSteps, stepTurns, toolLog, type Step } from "@/lib/folder/run";
 
 // POST /api/chat — auth → ownership → gates → context (+ course material, images, summary) → reserve → stream → reconcile → save.
-// Body: { provider, modelId, content, conversationId?, projectId?, retry?, attachmentIds?, mode?, courseOnly?, folder?, run? }
+// Body: { provider, modelId, content, conversationId?, projectId?, retry?, edit? (with retry: replace the last question), attachmentIds?, mode?, courseOnly?, folder?, run? }
 //   folder: { name } — the student connected a folder in the browser, so the model gets file tools.
 //   voice: true — voice conversation: short, speakable answers (the browser reads them aloud).
 //   code: true — the browser can run Python (lib/code/runner.ts), so the model gets run_python.
@@ -55,6 +57,7 @@ export async function POST(request: Request): Promise<Response> {
   const model = getModel(typeof body.modelId === "string" ? body.modelId : undefined);
   if (!model || !model.enabled || model.provider !== provider) return json({ error: "unknown_model" }, 400);
   const retry = body.retry === true;
+  const edit = retry && (body as { edit?: unknown }).edit === true; // retry with the last question rewritten (Edit message)
 
   // ---- folder tools + tool-run continuation
   const folderName =
@@ -125,6 +128,10 @@ export async function POST(request: Request): Promise<Response> {
     const lastUser = [...(msgs ?? [])].reverse().find((m) => m.role === "user");
     if (!lastUser) return json({ error: "nothing_to_retry" }, 400);
     await supabase.from("messages").delete().eq("conversation_id", conversation.id).eq("role", "assistant").gt("seq", lastUser.seq);
+    if (edit && content) {
+      const { error } = await supabase.from("messages").update({ content }).eq("id", lastUser.id);
+      if (error) return dbError(error, "save_failed");
+    }
     userMessageId = lastUser.id;
   } else {
     const { data, error } = await supabase
@@ -310,27 +317,32 @@ export async function POST(request: Request): Promise<Response> {
     }),
     ...runTurns,
   ];
+  // Public YouTube links in the question: Gemini watches the video itself (lib/connectors/youtube.ts).
+  const videos = provider === "google" && questionAt >= 0 ? youtubeLinks(turns[questionAt].content) : [];
+  if (videos.length) turns[questionAt] = { ...turns[questionAt], videos };
 
   const system = [systemPrompt({ ...promptBase, summary, retrieved:retrieval.block }), folderText].filter(Boolean).join("\n\n");
   // Tool definitions count as input too (~1.5k tokens for all of them).
   const inputTokens = ctx.tokens + runTokens + (tools ? estimateTokens(JSON.stringify(tools)) + 400 : 0) + estimateTokens(system) + [...images.values()].flat().length * IMAGE_TOKENS + material.visualTokens;
+  // Video tokens are billed by Gemini but aren't part of the history window, so they only raise the reservation.
+  const videoTokens = videos.length * YOUTUBE.reserveTokens;
 
   if (inputTokens > Math.min(model.contextTokens-model.maxOutputTokens,CONTEXT.maximumInputTokens)) {
     return json({error:"context_too_large",conversationId:conversation.id},413);
   }
-  const callMetadata = {conversationId:conversation.id,provider,operation:"chat" as const,inputEstimate:inputTokens,
+  const callMetadata = {conversationId:conversation.id,provider,operation:"chat" as const,inputEstimate:inputTokens + videoTokens,
     contextTarget,historyDropped:ctx.dropped,retrievedCount:retrieval.count};
 
   // ---- reservation (live only)
   let maxOutput = voice ? Math.min(model.maxOutputTokens, VOICE_MAX_OUTPUT) : model.maxOutputTokens;
   if (live) {
-    let r = await reserve(user.id, requestId, model.id, "text", reservationMicros(model, inputTokens, maxOutput),callMetadata);
+    let r = await reserve(user.id, requestId, model.id, "text", reservationMicros(model, inputTokens + videoTokens, maxOutput),callMetadata);
     if (!r.ok && r.reason === "budget" && r.remaining) {
       // Shrink the reply to fit what's left, if that still allows a useful answer.
-      const fit = Math.min(maxOutput, maxOutputFor(model, inputTokens, r.remaining));
+      const fit = Math.min(maxOutput, maxOutputFor(model, inputTokens + videoTokens, r.remaining));
       if (fit >= 500) {
         maxOutput = fit;
-        r = await reserve(user.id, requestId, model.id, "text", reservationMicros(model, inputTokens, maxOutput),callMetadata);
+        r = await reserve(user.id, requestId, model.id, "text", reservationMicros(model, inputTokens + videoTokens, maxOutput),callMetadata);
       }
     }
     if (!r.ok) {
@@ -377,6 +389,7 @@ export async function POST(request: Request): Promise<Response> {
       let text = priorText;
       let shown = priorText; // what the student actually saw (if they pressed Stop)
       let usage: Usage | undefined;
+      let finish:FinishReason="stop";
       const calls: ToolCall[] = [];
       let failure: ProviderError | null = null;
       try {
@@ -393,6 +406,7 @@ export async function POST(request: Request): Promise<Response> {
           }
           if (ev.toolCall && tools && calls.length < MAX_CALLS_PER_STEP) calls.push(ev.toolCall);
           if (ev.usage) usage = ev.usage;
+          if(ev.finish) finish=ev.finish;
           // If the student stopped, keep reading (server-side) so the provider reports real usage and we charge
           // the actual cost instead of the full reservation.
         }
@@ -400,10 +414,12 @@ export async function POST(request: Request): Promise<Response> {
         failure = e instanceof ProviderError ? e : new ProviderError((e as Error)?.name === "TimeoutError" ? "timeout" : "unknown", undefined, true);
       }
 
+      if(!failure && finish==="blocked" && !text.trim()) text="The model did not provide an answer to this request.";
       const stopped = clientGone && !failure;
       const finalText = stopped ? shown : text;
-      const wantsTools = !failure && !stopped && calls.length > 0;
-      const status = failure ? "error" : stopped || wantsTools ? "partial" : "complete";
+      const incomplete=finish==="length" || finish==="unknown";
+      const wantsTools = !failure && !stopped && !incomplete && finish!=="blocked" && calls.length > 0;
+      const status = failure ? "error" : stopped || wantsTools || incomplete ? "partial" : "complete";
       // References only point at passages that were really sent: made-up [S#] markers are removed from the saved text.
       // Quiz results: the server keeps the score; the marker lines are removed from the saved answer.
       // Memories: [[remember: …]] lines are saved (only when the student turned memory on) and removed from the answer.
@@ -414,19 +430,19 @@ export async function POST(request: Request): Promise<Response> {
       const ground = grounding(allSources, sources);
       await supabase.from("messages").update({ content: savedText, status, sources: ground === "none" ? null : sources }).eq("id", replyId);
       await supabase.from("conversations").update({ updated_at: new Date().toISOString() }).eq("id", conversation.id);
-      if (quiz?.results.length && !failure) {
+      if (quiz?.results.length && status==="complete" && finish!=="blocked") {
         quizState = applyResults(quizState, quiz.results);
         await supabase.from("conversations").update({ quiz_state: quizState }).eq("id", conversation.id);
       }
       let remembered: Memory[] = [];
-      if (personal.profile?.memory_enabled && remember.saved.length && !failure) {
+      if (personal.profile?.memory_enabled && remember.saved.length && status==="complete" && finish!=="blocked") {
         remembered = await saveMemories(supabase, user.id, conversation.id, personal.memories, remember.saved);
       }
       // File activity shown under the reply (needs migration 0004; skipped quietly if it hasn't been run).
       if (run) await supabase.from("messages").update({ tool_log: toolLog(run.steps) }).eq("id", replyId);
 
       if (live) {
-        if (usage) await settle(requestId, "settled", costMicros(model, usage), usage, failure?.code, {latencyMs:Date.now()-startedAt});
+        if (usage) await settle(requestId, "settled", costMicros(model, usage), usage, failure?.code, {latencyMs:Date.now()-startedAt,finishReason:finish,qualityVersion:RESPONSE_QUALITY_VERSION});
         else if (failure && !failure.started && text.length === priorText.length) await settle(requestId, "released", 0, undefined, failure.code);
         else await settle(requestId, "uncertain", 0, undefined, failure?.code ?? "no_usage");
       }
@@ -437,7 +453,7 @@ export async function POST(request: Request): Promise<Response> {
       }
       if (failure) send({ t: "error", code: failure.code });
       else if (wantsTools) send({ t: "tool_calls", replyId, text: text.slice(priorText.length).trim(), calls });
-      else send({ t: "done", status, sources, grounding: ground, content: savedText, ...(conversation.mode === "quiz" ? { quiz: quizState } : {}), ...(remembered.length ? { remembered } : {}) });
+      else send({ t: "done", status, finishReason:finish, sources, grounding: ground, content: savedText, ...(conversation.mode === "quiz" ? { quiz: quizState } : {}), ...(remembered.length ? { remembered } : {}) });
       try {
         controller.close();
       } catch {}

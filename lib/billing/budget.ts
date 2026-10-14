@@ -11,7 +11,7 @@ export type ReserveResult =
 
 export type CallMetadata = {
   conversationId?: string; provider?: ProviderId | "tavily" | "elevenlabs"; operation?: "chat" | "summary" | "embedding" | "search" | "image" | "transcription" | "speech";
-  inputEstimate?: number; contextTarget?: number; historyDropped?: boolean; retrievedCount?: number; latencyMs?: number; unitCostUsdMicros?: number;
+  inputEstimate?: number; contextTarget?: number; historyDropped?: boolean; retrievedCount?: number; latencyMs?: number; finishReason?: string; qualityVersion?: string; unitCostUsdMicros?: number;
 };
 export async function reserve(userId: string, requestId: string, modelId: string, kind: "text" | "image", boundMicros: number, metadata: CallMetadata = {}): Promise<ReserveResult> {
   const { data, error } = await createAdminClient().rpc("reserve_budget_v2", {

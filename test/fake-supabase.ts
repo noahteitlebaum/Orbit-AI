@@ -17,6 +17,13 @@ export function fakeSupabase(tables: Record<string, Row[]> = {}) {
     constructor(private table: string) {}
     select() { if (this.op !== "select") this.returning = true; return this; }
     insert(p: Row | Row[]) { this.op = "insert"; this.payload = p; return this; }
+    // upsert with ignoreDuplicates: rows matching an existing row on the onConflict columns are skipped
+    upsert(p: Row | Row[], o: { onConflict?: string; ignoreDuplicates?: boolean } = {}) {
+      const cols = (o.onConflict ?? "id").split(",");
+      const t = (db[this.table] ??= []);
+      const rows = (Array.isArray(p) ? p : [p]).filter((r) => !t.some((x) => cols.every((c) => x[c] === r[c] && r[c] != null)));
+      this.op = "insert"; this.payload = rows; return this;
+    }
     update(p: Row) { this.op = "update"; this.payload = p; return this; }
     delete() { this.op = "delete"; return this; }
     eq(c: string, v: unknown) { this.filters.push((r) => r[c] === v); return this; }

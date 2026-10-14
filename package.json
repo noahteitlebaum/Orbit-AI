@@ -9,18 +9,28 @@
     "lint": "eslint",
     "typecheck": "next typegen && tsc --noEmit",
     "test": "vitest run",
-    "benchmark:context": "vitest run benchmarks/context.test.ts --silent=false --reporter=verbose"
+    "benchmark:context": "vitest run benchmarks/context.test.ts --silent=false --reporter=verbose",
+    "eval:quality": "vitest run --config vitest.eval.config.mts --silent=false --reporter=verbose"
   },
   "dependencies": {
+    "@azure/msal-browser": "^5.25.0",
     "@supabase/ssr": "^0.12.7",
     "@supabase/supabase-js": "^2.117.2",
+    "docx": "^9.11.0",
     "exceljs": "^4.4.0",
     "jszip": "^3.10.1",
+    "katex": "^0.16.47",
     "mammoth": "^1.13.0",
     "next": "16.3.8",
     "pdf-lib": "^1.17.1",
+    "pptxgenjs": "^3.12.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
+    "react-markdown": "^10.1.0",
+    "rehype-highlight": "^7.0.2",
+    "rehype-katex": "^7.0.1",
+    "remark-gfm": "^4.0.1",
+    "remark-math": "^6.0.0",
     "unpdf": "^1.8.1"
   },
   "devDependencies": {

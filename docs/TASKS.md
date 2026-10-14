@@ -59,3 +59,11 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done. Keep optional features of
 - [ ] Jake/Natan: measure live synthetic recall, response accuracy, provider switching and phone UX before enabling retrieval
 - [ ] Second-model review before merging cost/context/auth changes; do not enable payments with this branch
 - [ ] Future payment integration: verified conversion/refund/cancellation receipts and atomic renewal/reset rules
+
+## Jake branch: response quality
+- [x] Shared student response contract with correction precedence, units, source boundaries and requested style
+- [x] Prioritize named/relevant source passages, preserve page identity and follow-up references
+- [x] Normalize completion reasons; disclose partial replies and prevent incomplete memory/tool/quiz updates
+- [x] Synthetic regression tests and 20-case live evaluation pack in benchmarks/response-quality-cases.json
+- [ ] Run blind, repeated live quality/cost/latency comparisons across all providers before claiming improved model accuracy
+- [ ] Stage phone/desktop completion and continuation UX; confirm detailed finish-state persistence needs

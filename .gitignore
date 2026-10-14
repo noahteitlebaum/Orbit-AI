@@ -43,3 +43,6 @@ next-env.d.ts
 # allow the template
 !.env.example
 
+
+# live evaluation output (may contain model answers)
+/benchmarks/results/

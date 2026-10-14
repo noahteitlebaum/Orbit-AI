@@ -45,14 +45,20 @@ export const openai: ProviderAdapter = {
     if (res.status === 400 && (fast || cacheKey)) res = await call(false, false);
     if (!res.ok || !res.body) throw errorForStatus(res.status);
 
+    let finished = false;
+    let refusal = false;
+    let hasCalls = false;
     for await (const { data } of readSse(res.body)) {
       if (data === "[DONE]") break;
       const ev = JSON.parse(data);
-      if (ev.type === "response.output_text.delta" && ev.delta) yield { delta: ev.delta as string };
+      if(ev.type === "response.refusal.delta") { refusal=true; if(ev.delta) yield {delta:ev.delta as string}; }
+      else if (ev.type === "response.output_text.delta" && ev.delta) yield { delta: ev.delta as string };
       else if (ev.type === "response.output_item.done" && ev.item?.type === "function_call") {
+        hasCalls=true;
         yield { toolCall: { id: String(ev.item.call_id), name: String(ev.item.name), args: parseArgs(ev.item.arguments) } };
       }
       else if (ev.type === "response.completed" || ev.type === "response.incomplete") {
+        finished=true;
         const u = ev.response?.usage;
         if (u) {
           yield {
@@ -65,10 +71,13 @@ export const openai: ProviderAdapter = {
             },
           };
         }
+        const why = ev.response?.incomplete_details?.reason;
+        yield { finish: ev.type === "response.incomplete" ? (why === "max_output_tokens" ? "length" : why === "content_filter" ? "blocked" : "unknown") : refusal ? "blocked" : hasCalls ? "tool_calls" : "stop" };
       } else if (ev.type === "response.failed" || ev.type === "error") {
         throw new ProviderError("unavailable", undefined, true);
       }
     }
+    if(!finished) throw new ProviderError("incomplete_stream",undefined,true);
   },
 
   async generateImage({ model, prompt, apiKey, signal }) {
