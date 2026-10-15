@@ -1,9 +1,8 @@
 // YouTube videos (integration memo #9): Gemini watches public YouTube videos directly (Gemini API "YouTube URL" input),
 // so a link in the question is passed to Gemini as video. Other providers just see the link text. No downloading,
-// no transcript scraping. Low media resolution keeps a 10-minute video near 60k tokens.
+// no transcript scraping. The full low-resolution request is counted before generation and must fit the chat input ceiling.
 export const YOUTUBE = {
   maxVideos: 1,
-  reserveTokens: 60_000, // reservation per video (~10 min at low resolution, ~100 tokens/second); settled on real usage
 };
 
 const ID = /^[A-Za-z0-9_-]{11}$/;

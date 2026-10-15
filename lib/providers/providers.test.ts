@@ -273,3 +273,24 @@ describe("openai optional settings", () => {
     expect(body(1).prompt_cache_key).toBeUndefined();
   });
 });
+
+
+describe("Gemini full-input preflight", () => {
+  const bodyOf = (m: ReturnType<typeof vi.fn>, i: number) => JSON.parse((m.mock.calls[i] as unknown as [string, RequestInit])[1].body as string);
+  it("counts the exact normalized generation request including video and tools", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce(Response.json({totalTokens:12345})).mockResolvedValueOnce(sseResponse([
+      `data: ${JSON.stringify({candidates:[{content:{parts:[{text:"ok"}]},finishReason:"STOP"}]})}`,
+    ]));
+    vi.stubGlobal("fetch",fetchMock);
+    const request = {...args(),tools:FOLDER_TOOLS,fast:true,history:[{role:"user" as const,content:"Watch this",videos:["https://www.youtube.com/watch?v=dQw4w9WgXcQ"]}]};
+    expect(await google.countTokens!(request)).toBe(12345);
+    await collect(google.stream(request));
+    const {model,...counted}=bodyOf(fetchMock,0).generateContentRequest;
+    expect(model).toBe("models/test-model"); expect(counted).toEqual(bodyOf(fetchMock,1));
+    expect(String(fetchMock.mock.calls[0][0])).toContain(":countTokens");
+  });
+  it.each([{}, {totalTokens:0}, {totalTokens:"123"}, {totalTokens:-1}, {totalTokens:1.5}])("rejects invalid token counts: %j", async response => {
+    vi.stubGlobal("fetch",vi.fn(async()=>Response.json(response)));
+    await expect(google.countTokens!(args())).rejects.toThrow();
+  });
+});

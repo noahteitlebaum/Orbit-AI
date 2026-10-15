@@ -109,6 +109,9 @@ export async function loadPersonal(supabase: SupabaseClient): Promise<{ profile:
 
 /** Save the AI's new memories (skipping duplicates, keeping at most LIMITS.memories). Returns what was saved. */
 export async function saveMemories(supabase: SupabaseClient, userId: string, conversationId: string, existing: Memory[], items: string[]): Promise<Memory[]> {
+  // Refresh the snapshot after streaming; migration 0013 also checks atomically at insert time.
+  const { data: profile, error } = await supabase.from("profiles").select("memory_enabled").eq("user_id", userId).maybeSingle();
+  if (error || !profile?.memory_enabled) return [];
   const seen = new Set(existing.map((m) => m.content.toLowerCase()));
   const fresh = [...new Set(items)].filter((s) => !seen.has(s.toLowerCase())).slice(0, Math.max(0, LIMITS.memories - existing.length));
   if (!fresh.length) return [];
@@ -123,6 +126,7 @@ export async function saveMemories(supabase: SupabaseClient, userId: string, con
 export function relevantMemories(memories: Memory[], question: string, tokenBudget = 600): Memory[] {
   const words = new Set(question.toLowerCase().match(/[a-z0-9]{3,}/g) ?? []);
   const ranked = memories.map((m,i)=>({m,i,score:(m.content.toLowerCase().match(/[a-z0-9]{3,}/g)??[]).filter(w=>words.has(w)).length}))
+    .filter(({score}) => score > 0)
     .sort((a,b)=>b.score-a.score || a.i-b.i);
   const out: Memory[] = []; let used=0;
   for(const {m} of ranked) { const n=Math.ceil(m.content.length/3)+6; if(used+n>tokenBudget) continue; out.push(m); used+=n; if(out.length>=12)break; }
