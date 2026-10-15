@@ -86,3 +86,9 @@ Model comparison, smart model routing, connectors (Drive/GitHub…), coding/comp
 All styling uses the Orbit AI design system ("Orbit Night" dark default, "Orbit Day" light), defined as CSS variables in `app/globals.css` and exposed as Tailwind utilities (`bg-surface-100`, `text-ink-muted`, `border-line`, `bg-brand`, `text-on-brand`, `bg-provider-anthropic`, `shadow-card`…). Never use Tailwind palette colors (zinc, red…) or raw hex in components. Brand pieces (`Wordmark`, `OrbitBackdrop`, `ProviderDot`) live in `components/brand.tsx`; logo PNGs in `public/brand/`. Provider colors are dots beside the model name.
 
 **Chat themes (Noah's decision, Oct 2026):** the chat screen has a left rail with each AI app's logo (ChatGPT, Claude, Gemini, Grok). Picking one opens that app's own chat list and re-skins the chat to look like that app: `data-theme="<provider>"` on the chat root re-points the tokens (colors, fonts) in `app/globals.css`; layout differences (greeting, composer/bubble shapes, reply font, disclaimer) live in `config/themes.ts`. The model menu in the message box (`components/model-menu.tsx`) lists only that app's models from `config/models.ts`. Logos are files in `public/providers/` set via `logo` in `config/themes.ts`. Auth pages and the rest of the app stay on Orbit Night/Day.
+
+## Smart context (Oct 15, Jake)
+`config/context.ts` defines an ~8k ordinary input target, a 24k expansion ceiling, up to six recent exchanges,
+bounded local lexical retrieval and memory selection. Full history stays saved. Summary expenses have ledger kind
+`summary`; embedding expense is zero (no embeddings yet). Migration 0009 is required before deployment.
+Read the updated Context policy in `docs/ARCHITECTURE.md` before editing selection, caching or cost accounting.

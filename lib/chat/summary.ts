@@ -1,3 +1,5 @@
+import { parseRemember } from "@/lib/profile/personal";
+import { CONTEXT } from "@/config/context";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { getModel, modelsFor, type ProviderId } from "@/config/models";
 import { reserve, settle } from "@/lib/billing/budget";
@@ -20,9 +22,10 @@ export type SummaryMessage = { seq: number; role: string; content: string; model
 export function transcriptLine(m: SummaryMessage): string {
   const who = m.role === "user" ? "Student" : `Assistant (${getModel(m.model_id ?? undefined)?.label ?? "AI"})`;
   const files = m.files?.length ? ` [attached: ${m.files.join(", ")}]` : "";
-  const text = m.content.length > MAX_MESSAGE_CHARS
-    ? `${m.content.slice(0, MAX_MESSAGE_CHARS * 0.7)}\n[…shortened…]\n${m.content.slice(-MAX_MESSAGE_CHARS * 0.3)}`
-    : m.content;
+  const content = parseRemember(m.content).clean;
+  const text = content.length > MAX_MESSAGE_CHARS
+    ? `${content.slice(0, MAX_MESSAGE_CHARS * 0.7)}\n[…shortened…]\n${content.slice(-MAX_MESSAGE_CHARS * 0.3)}`
+    : content;
   return `${who}${files}: ${text}`;
 }
 
@@ -56,7 +59,7 @@ export async function updateSummary(o: {
   dropped: SummaryMessage[]; // messages no longer sent, oldest first
 }): Promise<string | null> {
   const fresh = o.existingUpto == null ? o.dropped : o.dropped.filter((m) => m.seq > o.existingUpto!);
-  if (!fresh.length) return o.existing;
+  if (!fresh.length || (o.existing && fresh.length < CONTEXT.summaryRefreshMessages)) return o.existing;
   let summary = o.existing;
   for (const batch of batches(fresh).slice(0, MAX_PASSES)) {
     const next = await foldIn(o, summary, batch);
@@ -88,7 +91,7 @@ async function foldIn(
   const system = "You summarize study conversations so another assistant can continue them.";
   const maxOutput = 700;
   const requestId = crypto.randomUUID();
-  const r = await reserve(o.userId, requestId, model.id, "text", reservationMicros(model, estimateTokens(prompt + system), maxOutput));
+  const r = await reserve(o.userId, requestId, model.id, "summary", reservationMicros(model, estimateTokens(prompt + system), maxOutput));
   if (!r.ok) return null; // no budget for a summary: carry on without updating it
 
   let text = "";
@@ -107,5 +110,5 @@ async function foldIn(
   }
   if (usage) await settle(requestId, "settled", costMicros(model, usage), usage);
   else await settle(requestId, "uncertain", 0, undefined, "no_usage");
-  return text.trim() || null;
+  return estimateTokens(text) <= SUMMARY_TOKENS ? text.trim() || null : null;
 }

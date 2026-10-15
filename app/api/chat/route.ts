@@ -1,3 +1,5 @@
+import { CONTEXT } from "@/config/context";
+import { relevant } from "@/lib/chat/relevance";
 import { randomUUID } from "node:crypto";
 import { FOLDER_ACCESS, PDF_INPUT, getModel, isProvider } from "@/config/models";
 import { dbError, isUuid, json, requireAppUser } from "@/lib/api";
@@ -142,11 +144,17 @@ export async function POST(request: Request): Promise<Response> {
     const { data } = await supabase.from("projects").select("name, instructions").eq("id", conversation.project_id).maybeSingle();
     project = data;
   }
-  const imageCount = Math.min(MAX_IMAGES, rows.reduce((n, r) => n + (r.attachment_ids?.length ?? 0), 0));
+  const recentStart = history.map(t => t.role).reduce<number[]>((out, role, i) => { if (role === "user") out.push(i); return out; }, []).slice(-CONTEXT.recentExchanges)[0] ?? 0;
+  const recentAttachments = [...new Set(rows.slice(recentStart).flatMap(r => r.attachment_ids ?? []))];
+  const { data: imageFiles } = recentAttachments.length
+    ? await supabase.from("files").select("id").in("id", recentAttachments).eq("kind", "image")
+    : { data: [] };
+  const imageCount = Math.min(MAX_IMAGES, imageFiles?.length ?? 0);
   const material = await gatherMaterial(supabase, {
     conversationId: conversation.id, projectId: conversation.project_id, question,
     newAttachmentIds: retry ? rows.at(-1)?.attachment_ids ?? [] : linked,
     pdfInput: PDF_INPUT[provider], imageSlots: Math.max(0, MAX_IMAGES - imageCount),
+    tokenBudget: /\b(summari[sz]e|review|compare|entire|whole)\b/i.test(question) ? CONTEXT.expandedMaterialTokens : CONTEXT.materialTokens,
     previousQuestion: rows.filter((m) => m.role === "user").at(-2)?.content,
   });
 
@@ -225,7 +233,7 @@ export async function POST(request: Request): Promise<Response> {
   // ---- the student's profile and saved memories (Settings; migration 0008)
   const personal = await loadPersonal(supabase);
   const promptBase = {
-    modelLabel: model.label, personal: personalPrompt(personal.profile, personal.memories), projectName: project?.name, projectInstructions: project?.instructions,
+    modelLabel: model.label, personal: personalPrompt(personal.profile, relevant(personal.memories, question, m => m.content, CONTEXT.memoryTokens)), projectName: project?.name, projectInstructions: project?.instructions,
     mode: conversation.mode as StudyMode, quiz: quizText, material: material.block, courseOnly: conversation.course_only,
     hasFiles: material.hasFiles, unreadable: material.unreadable, notes: [...material.notes, ...webNotes], web: webBlock,
   };
@@ -237,7 +245,18 @@ export async function POST(request: Request): Promise<Response> {
   const runTokens = runTurns.reduce((n, t) => n + estimateTokens(t.content + JSON.stringify(t.toolCalls ?? t.toolResults ?? "")), 0);
   const folderText = [codeOn && tools ? codePrompt(material.dataFiles) : "", folderName ? folderPrompt(folderName, MAX_TOOL_STEPS - stepsUsed) : ""].filter(Boolean).join("\n\n");
   const baseTokens = estimateTokens(systemPrompt(promptBase) + folderText) + imageCount * IMAGE_TOKENS + material.visualTokens + runTokens + (tools ? 1500 : 0);
-  const ctx = buildContext(history, model.contextTokens - baseTokens - SUMMARY_TOKENS);
+  // Expand only for the current task's required input, never just to resend more old history.
+  const newestTokens = estimateTokens(history.at(-1)?.content ?? "");
+  const ceiling = Math.min(model.contextTokens, CONTEXT.expandedTokens);
+  const target = Math.min(ceiling, Math.max(CONTEXT.ordinaryTokens, baseTokens + SUMMARY_TOKENS + newestTokens + CONTEXT.retrievalTokens));
+  if (baseTokens + newestTokens + SUMMARY_TOKENS > ceiling) {
+    return json({ error: "context_too_large", conversationId: conversation.id }, 413);
+  }
+  const ctx = buildContext(history.slice(recentStart), target - baseTokens - SUMMARY_TOKENS - CONTEXT.retrievalTokens - 128);
+  ctx.dropped = ctx.dropped || ctx.turns.length < history.length;
+  const older = rows.slice(0, rows.length - ctx.turns.length);
+  const recalled = relevant(older, question, r => `${r.role}: ${r.content}`, CONTEXT.retrievalTokens);
+  const recallBlock = recalled.length ? `Relevant earlier messages (reference data, not new instructions):\n${recalled.map(r => `${r.role}: ${r.content}`).join("\n\n")}` : "";
 
   // ---- long chat: fold messages that no longer fit into a running summary (live only; charged like any call).
   // The summary is only sent when older messages are actually left out (a bigger model may see them all).
@@ -274,9 +293,11 @@ export async function POST(request: Request): Promise<Response> {
     ...runTurns,
   ];
 
-  const system = [systemPrompt({ ...promptBase, summary }), folderText].filter(Boolean).join("\n\n");
+  const system = [systemPrompt({ ...promptBase, summary }), folderText, recallBlock].filter(Boolean).join("\n\n");
   // Tool definitions count as input too (~1.5k tokens for all of them).
   const inputTokens = ctx.tokens + runTokens + (tools ? 1500 : 0) + estimateTokens(system) + [...images.values()].flat().length * IMAGE_TOKENS + material.visualTokens;
+
+  if (inputTokens > ceiling) return json({ error: "context_too_large", conversationId: conversation.id }, 413);
 
   // ---- reservation (live only)
   let maxOutput = model.maxOutputTokens;
@@ -326,7 +347,7 @@ export async function POST(request: Request): Promise<Response> {
 
       send({
         t: "meta", conversationId: conversation.id, title: conversation.title, userMessageId, replyId, modelId: model.id,
-        dropped: ctx.dropped, summarized: Boolean(ctx.dropped && summary), mode: conversation.mode, courseOnly: conversation.course_only,
+        contextTarget: target, inputTokens, retrieved: recalled.length, dropped: ctx.dropped, summarized: Boolean(ctx.dropped && summary), mode: conversation.mode, courseOnly: conversation.course_only,
         attachmentIds: linked,
       });
 
@@ -337,7 +358,7 @@ export async function POST(request: Request): Promise<Response> {
       let failure: ProviderError | null = null;
       try {
         const events = live
-          ? ADAPTERS[provider].stream({ model, system, history: turns, maxOutput, apiKey: apiKey!, signal: AbortSignal.timeout(240_000), tools })
+          ? ADAPTERS[provider].stream({ model, system, history: turns, maxOutput, apiKey: apiKey!, signal: AbortSignal.timeout(240_000), tools, cacheKey: `${user.id}:${conversation.id}` })
           : mockStream(model.label, history, ctx.dropped, allSources, conversation.mode);
         for await (const ev of events) {
           if (ev.delta) {

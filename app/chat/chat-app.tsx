@@ -69,6 +69,7 @@ function errorText(code: string, label: string, appName: string): string {
     case "model_unavailable": return `${label} isn't available on this API key. Pick another model in the menu.`;
     case "auth": return `${appName} rejected the API key. It may have expired or been revoked.`;
     case "rate_limit": return `${appName} is rate-limiting us or the API account is out of credit. Try again shortly.`;
+    case "context_too_large": return "This request needs too much context. Try fewer attachments or a smaller task.";
     case "reserve_failed": return "Couldn't check your budget. Make sure the database migrations have been run.";
     case "db_setup": return "The database isn't fully set up yet. Run every file in supabase/migrations in order in the Supabase SQL Editor.";
     case "bad_request": return `${label} couldn't handle that request.`;
@@ -1107,8 +1108,8 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                 {active && (dropped[active.id] || chatSettings.summarized) && (
                   <p className="mb-6 rounded-xl bg-surface-200 px-4 py-2.5 text-center text-xs text-ink-muted">
                     {chatSettings.summarized
-                      ? `This chat is long: ${currentModel?.label ?? "the model"} gets a summary of older messages plus the recent ones.`
-                      : `Older messages not included — this chat is longer than ${currentModel?.label ?? "the model"} is sent at once.`}
+                      ? `Smart context: ${currentModel?.label ?? "the model"} gets recent exchanges, an available older-message summary, and matching earlier details. Summaries may lag recent messages. Full history stays saved.`
+                      : `Smart context sends recent exchanges and matching earlier details. Some older messages are omitted; full history stays saved.`}
                   </p>
                 )}
                 <ul className="space-y-8">

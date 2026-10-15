@@ -7,7 +7,7 @@ export type ReserveResult =
   | { ok: true; remaining: number }
   | { ok: false; reason: "budget" | "global_stop" | "duplicate" | "error"; remaining?: number };
 
-export async function reserve(userId: string, requestId: string, modelId: string, kind: "text" | "image", boundMicros: number): Promise<ReserveResult> {
+export async function reserve(userId: string, requestId: string, modelId: string, kind: "text" | "image" | "summary" | "embedding", boundMicros: number): Promise<ReserveResult> {
   const { data, error } = await createAdminClient().rpc("reserve_budget", {
     p_user_id: userId,
     p_request_id: requestId,
@@ -31,6 +31,7 @@ export async function settle(requestId: string, state: "settled" | "uncertain" |
     p_output_tokens: usage?.output ?? null,
     p_reasoning_tokens: usage?.reasoning ?? null,
     p_cached_tokens: usage?.cached ?? null,
+    p_cache_write_tokens: usage?.cacheWrite ?? null,
     p_error_code: errorCode ?? null,
   });
   // The ledger row stays "reserved" (still counted against the budget) if this fails, so we never under-charge.

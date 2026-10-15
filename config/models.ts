@@ -13,6 +13,8 @@ export interface ModelOption {
   providerLabel: string;
   enabled: boolean;
   apiModel: string;    // the provider's model id
+  cachedInputPrice?: number; // omitted until verified: conservatively use full input price
+  cacheWriteMultiplier?: number;
   inputPrice: number;  // $ / 1M input tokens
   outputPrice: number; // $ / 1M output tokens (includes reasoning tokens)
   contextTokens: number; // most history we send per request (kept below the model's window to cap cost)
@@ -23,33 +25,33 @@ export const MODELS: ModelOption[] = [
   {
     id: "openai-default", label: "GPT-6.1 Sol", short: "Sol", description: "Smart flagship for everyday work",
     provider: "openai", providerLabel: "OpenAI", enabled: true,
-    apiModel: "gpt-6.1-sol", inputPrice: 2, outputPrice: 10, contextTokens: 60_000, maxOutputTokens: 8_000,
+    cachedInputPrice: 0.1, cacheWriteMultiplier: 1.25, apiModel: "gpt-6.1-sol", inputPrice: 2, outputPrice: 10, contextTokens: 60_000, maxOutputTokens: 8_000,
   },
   {
     id: "openai-astra", label: "GPT-6 Astra", short: "Astra", description: "Most capable — slower and pricier",
     provider: "openai", providerLabel: "OpenAI", enabled: true,
-    apiModel: "gpt-6-astra", inputPrice: 10, outputPrice: 50, contextTokens: 40_000, maxOutputTokens: 8_000,
+    cachedInputPrice: 1, cacheWriteMultiplier: 1.25, apiModel: "gpt-6-astra", inputPrice: 10, outputPrice: 50, contextTokens: 40_000, maxOutputTokens: 8_000,
   },
   {
     id: "openai-luna", label: "GPT-6 Luna", short: "Luna", description: "Fastest and cheapest",
     provider: "openai", providerLabel: "OpenAI", enabled: true,
-    apiModel: "gpt-6-luna", inputPrice: 0.1, outputPrice: 0.5, contextTokens: 60_000, maxOutputTokens: 8_000,
+    cachedInputPrice: 0.01, cacheWriteMultiplier: 1.25, apiModel: "gpt-6-luna", inputPrice: 0.1, outputPrice: 0.5, contextTokens: 60_000, maxOutputTokens: 8_000,
   },
 
   {
     id: "anthropic-default", label: "Claude Sonnet 5.5", short: "Sonnet 5.5", description: "Best balance of speed and intelligence",
     provider: "anthropic", providerLabel: "Anthropic", enabled: true,
-    apiModel: "claude-sonnet-5-5", inputPrice: 2, outputPrice: 10, contextTokens: 60_000, maxOutputTokens: 8_000,
+    cachedInputPrice: 0.1, cacheWriteMultiplier: 1.25, apiModel: "claude-sonnet-5-5", inputPrice: 2, outputPrice: 10, contextTokens: 60_000, maxOutputTokens: 8_000,
   },
   {
     id: "anthropic-opus", label: "Claude Opus 5.5", short: "Opus 5.5", description: "Most capable for complex work",
     provider: "anthropic", providerLabel: "Anthropic", enabled: true,
-    apiModel: "claude-opus-5-5", inputPrice: 4, outputPrice: 20, contextTokens: 60_000, maxOutputTokens: 8_000,
+    cachedInputPrice: 0.2, cacheWriteMultiplier: 1.25, apiModel: "claude-opus-5-5", inputPrice: 4, outputPrice: 20, contextTokens: 60_000, maxOutputTokens: 8_000,
   },
   {
     id: "anthropic-haiku", label: "Claude Haiku 4.5", short: "Haiku 4.5", description: "Fastest for quick answers",
     provider: "anthropic", providerLabel: "Anthropic", enabled: true,
-    apiModel: "claude-haiku-4-5-20251001", inputPrice: 1, outputPrice: 5, contextTokens: 60_000, maxOutputTokens: 8_000,
+    cachedInputPrice: 0.1, cacheWriteMultiplier: 1.25, apiModel: "claude-haiku-4-5-20251001", inputPrice: 1, outputPrice: 5, contextTokens: 60_000, maxOutputTokens: 8_000,
   },
 
   {
@@ -68,7 +70,7 @@ export const MODELS: ModelOption[] = [
   {
     id: "xai-default", label: "Grok 4.7", short: "Grok 4.7", description: "xAI's flagship model",
     provider: "xai", providerLabel: "xAI", enabled: true,
-    apiModel: "grok-4.7", inputPrice: 2, outputPrice: 6, contextTokens: 60_000, maxOutputTokens: 8_000,
+    cachedInputPrice: 0.5, apiModel: "grok-4.7", inputPrice: 2, outputPrice: 6, contextTokens: 60_000, maxOutputTokens: 8_000,
   },
 ];
 

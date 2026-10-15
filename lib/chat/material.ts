@@ -1,3 +1,4 @@
+import { CONTEXT } from "@/config/context";
 import { DATA_FILE } from "@/lib/code/tools";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { referenceLabel } from "@/lib/files/extract";
@@ -20,8 +21,8 @@ type FileRow = {
 };
 type ChunkRow = { file_id: string; page: number | null; chunk_index: number; content: string };
 
-export const MATERIAL_TOKEN_BUDGET = 12_000;
-const SMALL_FILE_CHARS = 24_000; // attachments this small are sent whole
+export const MATERIAL_TOKEN_BUDGET = CONTEXT.materialTokens;
+const SMALL_FILE_CHARS = 24_000; // new small uploads are candidates for full text, within the material allowance
 export const IMAGE_TOKENS = 1_600; // rough cost of one image in the prompt
 export const MAX_IMAGES = 4;
 export const EXCERPT_CHARS = 600;     // passage text kept with each reference, so students can check it
@@ -45,6 +46,7 @@ export async function gatherMaterial(
   supabase: SupabaseClient,
   opts: {
     conversationId: string; projectId: string | null; question: string; newAttachmentIds: string[]; pdfInput: boolean; imageSlots?: number;
+    tokenBudget?: number;
     previousQuestion?: string; // the student's message before this one, for follow-ups like "and the second one?"
   },
 ): Promise<Material> {
@@ -84,7 +86,11 @@ export async function gatherMaterial(
     const key = `${c.file_id}:${c.chunk_index}`;
     if (seen.has(key)) return true;
     const t = estimateTokens(c.content);
-    if (tokens + t > MATERIAL_TOKEN_BUDGET) return false;
+    if (tokens + t > (opts.tokenBudget ?? MATERIAL_TOKEN_BUDGET)) {
+      const note = "Only selected passages from the files fit this request. Do not claim to have read the whole file; if more is needed, ask for a specific section or a smaller task.";
+      if (!notes.includes(note)) notes.push(note);
+      return false;
+    }
     seen.add(key);
     picked.push(c);
     tokens += t;
@@ -92,8 +98,10 @@ export async function gatherMaterial(
   };
 
   // 1. Small chat attachments are sent whole (newest first) — "summarize this" has no keywords to search for.
+  const attachments = ready.filter(f => f.conversation_id === opts.conversationId);
+  const genericFollowup = /^(explain|summari[sz]e|describe) (this|it)[.!?]*$/i.test(opts.question.trim());
   const small = ready
-    .filter((f) => f.conversation_id === opts.conversationId && (f.char_count ?? 0) <= SMALL_FILE_CHARS)
+    .filter((f) => f.conversation_id === opts.conversationId && (opts.newAttachmentIds.includes(f.id) || (attachments.length === 1 && genericFollowup)) && (f.char_count ?? 0) <= SMALL_FILE_CHARS)
     .sort((a, b) => Number(opts.newAttachmentIds.includes(b.id)) - Number(opts.newAttachmentIds.includes(a.id)));
   for (const f of small) {
     const { data: chunks } = await supabase.from("file_chunks").select("file_id, page, chunk_index, content").eq("file_id", f.id).order("chunk_index");

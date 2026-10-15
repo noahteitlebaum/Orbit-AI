@@ -81,8 +81,16 @@ describe("adapters", () => {
     vi.stubGlobal("fetch", fetchMock);
     expect(await collect(anthropic.stream(args()))).toEqual({ text: "Hi", usage: { input: 10, output: 9, reasoning: 0, cached: 3 } });
     const body = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
-    expect(body.system).toBe("sys");
+    expect(body.system).toEqual([{ type: "text", text: "sys", cache_control: { type: "ephemeral" } }]);
     expect(body.messages[0]).toEqual({ role: "user", content: "hi" });
+  });
+
+  it("separates Anthropic cache writes from reads", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => sseResponse([
+      `data: ${JSON.stringify({ type: "message_start", message: { usage: { input_tokens: 7, cache_read_input_tokens: 3, cache_creation_input_tokens: 5 } } })}`,
+      `data: ${JSON.stringify({ type: "message_stop" })}`,
+    ])));
+    expect((await collect(anthropic.stream(args()))).usage).toMatchObject({ input: 15, cached: 3, cacheWrite: 5 });
   });
 
   it("google: maps assistant→model, skips thoughts, bills thinking as output", async () => {

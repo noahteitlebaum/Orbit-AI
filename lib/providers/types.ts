@@ -15,7 +15,8 @@ export interface Usage {
   input: number;     // prompt tokens
   output: number;    // billable output tokens, including reasoning/thinking
   reasoning: number; // part of output spent on reasoning (for reporting)
-  cached: number;    // prompt tokens served from cache (reporting only; billed at full price to stay safe)
+  cached: number;    // prompt tokens served from cache
+  cacheWrite?: number; // included in input; billed at the configured write rate
 }
 
 export type StreamEvent = { delta?: string; usage?: Usage; toolCall?: ToolCall };
@@ -35,6 +36,7 @@ export interface StreamArgs {
   maxOutput: number;
   apiKey: string;
   signal: AbortSignal;
+  cacheKey?: string; // opaque user + conversation IDs only
   tools?: ToolDef[]; // folder tools, when the student connected a folder
 }
 

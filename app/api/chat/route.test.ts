@@ -388,6 +388,7 @@ describe("persistent chats and model switching", () => {
     expect(state.lastArgs!.history.at(-1)!.content).toBe("and now?");
     const conv = state.fake!.db.conversations[0];
     expect(conv.summary).toBe("Goal: new summary");
+    expect(vi.mocked(budget.reserve).mock.calls.some(c => c[3] === "summary")).toBe(true);
     expect(conv.summary_upto as number).toBeGreaterThan(-1000);
 
     // A short chat with an old summary doesn't send it (everything fits).
@@ -467,5 +468,48 @@ describe("web search", () => {
     expect(fetchMock).not.toHaveBeenCalled();
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
+  });
+});
+
+
+describe("smart context", () => {
+  const id = "33333333-3333-4333-8333-333333333333";
+  function seed() {
+    state.fake!.db.conversations.push({ id, user_id: "user-1", provider: "anthropic", modelId: "anthropic-default", title: "test", project_id: null, mode: "chat", course_only: false, summary: "Older study discussion", summary_upto: 100 });
+    for (let i = 0; i < 20; i++) state.fake!.db.messages.push({ id: `old-${i}`, conversation_id: id, seq: i - 100, role: i % 2 ? "assistant" : "user", content: i === 0 ? "The sodium experiment temperature was 22 Celsius." : "A separate discussion of poetry.", status: "complete", kind: "text", attachment_ids: [] });
+  }
+  it("limits recent exchanges, recalls matching older facts, and keeps full stored history", async () => {
+    state.live = true;
+    seed();
+    const before = state.fake!.db.messages.length;
+    const events = await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", conversationId: id, content: "What temperature was the sodium experiment?" })));
+    expect(events[0]).toMatchObject({ dropped: true, summarized: true, contextTarget: 8000, retrieved: 1 });
+    expect(events[0].inputTokens).toBeLessThanOrEqual(8000);
+    expect(state.lastArgs!.history.filter(t => t.role === "user").length).toBeLessThanOrEqual(6);
+    expect(state.lastArgs!.system).toContain("22 Celsius");
+    expect(state.fake!.db.messages).toHaveLength(before + 2);
+    expect(budget.reserve).toHaveBeenCalledOnce(); // saved summary is reused
+  });
+  it("expands only for a large current task, within the configured ceiling", async () => {
+    state.live = true;
+    const events = await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "x".repeat(30000) })));
+    expect(events[0].contextTarget).toBeGreaterThan(8000);
+    expect(events[0].inputTokens).toBeLessThanOrEqual(24000);
+  });
+  it("only selects matching saved memories when memory is enabled", async () => {
+    state.live = true;
+    state.fake!.db.profiles = [{ memory_enabled: true }];
+    state.fake!.db.memories = [];
+    state.fake!.db.memories.push({ id: "m1", content: "Sodium lab uses Celsius", source: "student", created_at: "" }, { id: "m2", content: "Enjoys ancient poetry", source: "student", created_at: "" });
+    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "Help with sodium lab" })));
+    expect(state.lastArgs!.system).toContain("Sodium lab uses Celsius");
+    expect(state.lastArgs!.system).not.toContain("ancient poetry");
+    state.fake!.db.memories = []; // deletion is visible on the very next request
+    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "Help with sodium lab" })));
+    expect(state.lastArgs!.system).not.toContain("Sodium lab uses Celsius");
+    state.fake!.db.memories = [{ id: "m1", content: "Sodium lab uses Celsius", source: "student", created_at: "" }];
+    state.fake!.db.profiles[0].memory_enabled = false;
+    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "Help with sodium lab" })));
+    expect(state.lastArgs!.system).not.toContain("Sodium lab uses Celsius");
   });
 });

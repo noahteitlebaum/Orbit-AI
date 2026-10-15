@@ -38,3 +38,17 @@ describe("money", () => {
     expect(maxOutputFor(m, 1000, 100)).toBe(0);
   });
 });
+
+
+describe("cache cost accounting", () => {
+  const model = { inputPrice: 2, outputPrice: 10, cachedInputPrice: 0.1, cacheWriteMultiplier: 1.25 };
+  it("charges read, write and uncached input at their separate rates", () => {
+    expect(costMicros(model, { input: 1000, output: 100, cached: 400, cacheWrite: 200 })).toBe(2340);
+  });
+  it("reserves for cache misses and write premiums, never assumes a hit", () => {
+    const bound = reservationMicros(model, 1000, 500);
+    expect(bound).toBeGreaterThan(costMicros(model, { input: 1000, output: 500, cacheWrite: 1000 }));
+    const fit = maxOutputFor(model, 1000, 8000);
+    expect(reservationMicros(model, 1000, fit)).toBeLessThanOrEqual(8000);
+  });
+});

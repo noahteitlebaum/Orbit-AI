@@ -47,3 +47,9 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done. Keep optional features of
 - Jake: currency, initial budget, trial amount, launch mode (Oct 5). Subscription rules and policy text (Oct 10)
 - Natan: tester count, survey destination, launch volume (Oct 10)
 - Team: Oct 17–19 coverage (Oct 16)
+
+## Smart context (Jake, Oct 15)
+- [x] Ordinary ~8k input target, bounded expansion, up to six recent exchanges, incremental summaries, selected older history and opted-in memories.
+- [x] Provider caching support and separate summary/cache-write cost accounting; lexical retrieval has zero embedding expense.
+- [x] Mock-provider checks for context limits, continuity, memory preference and cost calculations.
+- [ ] Run migration 0009 in the deployment database before deploying; confirm real-provider cache hit rates and expense totals with synthetic data.

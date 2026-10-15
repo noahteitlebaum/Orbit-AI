@@ -25,18 +25,21 @@ export function buildContext(history: ChatTurn[], budgetTokens: number): { turns
 }
 
 /** Cost in micros (millionths of $). Prices are $ per 1M tokens, so tokens × price is already micros. */
-export function costMicros(model: Pick<ModelOption, "inputPrice" | "outputPrice">, usage: Pick<Usage, "input" | "output">): number {
-  return Math.ceil(usage.input * model.inputPrice + usage.output * model.outputPrice);
+export function costMicros(model: Pick<ModelOption, "inputPrice" | "outputPrice" | "cachedInputPrice" | "cacheWriteMultiplier">, usage: Pick<Usage, "input" | "output"> & Partial<Pick<Usage, "cached" | "cacheWrite">>): number {
+  const cached = Math.min(usage.input, Math.max(0, usage.cached ?? 0));
+  const written = Math.min(usage.input - cached, Math.max(0, usage.cacheWrite ?? 0));
+  return Math.ceil((usage.input - cached - written) * model.inputPrice + cached * (model.cachedInputPrice ?? model.inputPrice)
+    + written * model.inputPrice * (model.cacheWriteMultiplier ?? 1) + usage.output * model.outputPrice);
 }
 
 /** Upper bound reserved before a call: estimated input (+15% margin) at full price + every allowed output token. */
-export function reservationMicros(model: Pick<ModelOption, "inputPrice" | "outputPrice">, inputTokens: number, maxOutput: number): number {
-  return Math.ceil(inputTokens * 1.15 * model.inputPrice + maxOutput * model.outputPrice);
+export function reservationMicros(model: Pick<ModelOption, "inputPrice" | "outputPrice" | "cachedInputPrice" | "cacheWriteMultiplier">, inputTokens: number, maxOutput: number): number {
+  return Math.ceil(inputTokens * 1.15 * model.inputPrice * Math.max(1, model.cacheWriteMultiplier ?? 1) + maxOutput * model.outputPrice);
 }
 
 /** Largest output that still fits the remaining budget (0 if none). */
-export function maxOutputFor(model: Pick<ModelOption, "inputPrice" | "outputPrice">, inputTokens: number, remainingMicros: number): number {
-  const left = remainingMicros - inputTokens * 1.15 * model.inputPrice;
+export function maxOutputFor(model: Pick<ModelOption, "inputPrice" | "outputPrice" | "cachedInputPrice" | "cacheWriteMultiplier">, inputTokens: number, remainingMicros: number): number {
+  const left = remainingMicros - inputTokens * 1.15 * model.inputPrice * Math.max(1, model.cacheWriteMultiplier ?? 1);
   return left <= 0 ? 0 : Math.floor(left / model.outputPrice);
 }
 

@@ -23,13 +23,14 @@ function toInput(t: ChatTurn): object[] {
 export const openai: ProviderAdapter = {
   id: "openai",
 
-  async *stream({ model, system, history, maxOutput, apiKey, signal, tools }) {
+  async *stream({ model, system, history, maxOutput, apiKey, signal, tools, cacheKey }) {
     const res = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
         model: model.apiModel,
         instructions: system,
+        ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
         input: normalizeTurns(history).flatMap(toInput),
         ...(tools?.length ? { tools: tools.map((t) => ({ type: "function", ...toolSchema(t), strict: false })) } : {}),
         max_output_tokens: maxOutput,
@@ -56,6 +57,7 @@ export const openai: ProviderAdapter = {
               output: u.output_tokens ?? 0,
               reasoning: u.output_tokens_details?.reasoning_tokens ?? 0,
               cached: u.input_tokens_details?.cached_tokens ?? 0,
+              ...(u.input_tokens_details?.cache_write_tokens ? { cacheWrite: u.input_tokens_details.cache_write_tokens } : {}),
             },
           };
         }
