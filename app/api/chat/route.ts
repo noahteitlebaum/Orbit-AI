@@ -5,7 +5,7 @@ import { retrieveRelevant } from "@/lib/chat/retrieval";
 import { randomUUID, createHash } from "node:crypto";
 import { FOLDER_ACCESS, PDF_INPUT, getModel, isProvider } from "@/config/models";
 import { dbError, isUuid, json, requireAppUser } from "@/lib/api";
-import { youtubeLinks, YOUTUBE } from "@/lib/connectors/youtube";
+import { youtubeLinks } from "@/lib/connectors/youtube";
 import { isProviderDisabled, overRateLimit, reserve, settle } from "@/lib/billing/budget";
 import { buildEconomicContext, economicInputBudget, costMicros, estimateTokens, maxOutputFor, reservationMicros, STUDY_MODES, systemPrompt, type StudyMode } from "@/lib/chat/context";
 import { citedSources, gatherMaterial, grounding, IMAGE_TOKENS, loadImages, MAX_IMAGES, stripInventedCitations, type Source } from "@/lib/chat/material";
@@ -168,11 +168,18 @@ export async function POST(request: Request): Promise<Response> {
     const { data } = await supabase.from("projects").select("name, instructions").eq("id", conversation.project_id).maybeSingle();
     project = data;
   }
-  const imageCount = Math.min(MAX_IMAGES, rows.reduce((n, r) => n + (r.attachment_ids?.length ?? 0), 0));
+  const attachmentImageCandidates = [...new Set(rows.flatMap(r => r.attachment_ids ?? []))];
+  const { data: imageFiles } = attachmentImageCandidates.length
+    ? await supabase.from("files").select("id").in("id", attachmentImageCandidates).eq("kind", "image")
+    : { data: [] };
+  const imageCount = Math.min(MAX_IMAGES, imageFiles?.length ?? 0);
+  const largeMaterialTask = /\b(summari[sz]e|review|compare|entire|whole)\b/i.test(question);
   const material = await gatherMaterial(supabase, {
     conversationId: conversation.id, projectId: conversation.project_id, question,
     newAttachmentIds: retry ? rows.at(-1)?.attachment_ids ?? [] : linked,
     pdfInput: PDF_INPUT[provider], imageSlots: Math.max(0, MAX_IMAGES - imageCount),
+    tokenBudget: largeMaterialTask ? CONTEXT.largeTaskMaterialTokens : CONTEXT.materialTokens,
+    referencedAttachmentIds: [...rows].reverse().find(r => r.role === "user" && r.attachment_ids?.length)?.attachment_ids ?? [],
     previousQuestion: rows.filter((m) => m.role === "user").at(-2)?.content,
   });
 
@@ -266,7 +273,7 @@ export async function POST(request: Request): Promise<Response> {
   const folderText = [codeOn && tools ? codePrompt(material.dataFiles) : "", folderName && !voice ? folderPrompt(folderName, MAX_TOOL_STEPS - stepsUsed) : ""].filter(Boolean).join("\n\n");
   const baseTokens = estimateTokens(systemPrompt(promptBase) + folderText) + imageCount * IMAGE_TOKENS + material.visualTokens + runTokens + (tools ? estimateTokens(JSON.stringify(tools)) + 400 : 0);
   const contextTarget = economicInputBudget(history, baseTokens + SUMMARY_TOKENS + CONTEXT.retrievalTokens,
-    model.contextTokens - model.maxOutputTokens, Boolean(tools || material.hasFiles));
+    model.contextTokens - model.maxOutputTokens, Boolean(tools || largeMaterialTask && material.hasFiles || material.visualTokens));
   const ctx = buildEconomicContext(history, Math.max(0, contextTarget - baseTokens - SUMMARY_TOKENS - CONTEXT.retrievalTokens));
 
   // ---- long chat: fold messages that no longer fit into a running summary (live only; charged like any call).
@@ -323,26 +330,37 @@ export async function POST(request: Request): Promise<Response> {
 
   const system = [systemPrompt({ ...promptBase, summary, retrieved:retrieval.block }), folderText].filter(Boolean).join("\n\n");
   // Tool definitions count as input too (~1.5k tokens for all of them).
-  const inputTokens = ctx.tokens + runTokens + (tools ? estimateTokens(JSON.stringify(tools)) + 400 : 0) + estimateTokens(system) + [...images.values()].flat().length * IMAGE_TOKENS + material.visualTokens;
-  // Video tokens are billed by Gemini but aren't part of the history window, so they only raise the reservation.
-  const videoTokens = videos.length * YOUTUBE.reserveTokens;
+  let inputTokens = ctx.tokens + runTokens + (tools ? estimateTokens(JSON.stringify(tools)) + 400 : 0) + estimateTokens(system) + [...images.values()].flat().length * IMAGE_TOKENS + material.visualTokens;
+  // Video duration cannot be inferred from a URL. Count the complete request before paid generation;
+  // fail closed on unavailable/malformed counts rather than fall back to a fixed-duration estimate.
+  if (videos.length && live && apiKey) {
+    try {
+      const count = await ADAPTERS[provider].countTokens?.({ model, system, history: turns, tools, fast: voice,
+        maxOutput: voice ? Math.min(model.maxOutputTokens, VOICE_MAX_OUTPUT) : model.maxOutputTokens,
+        apiKey, signal: AbortSignal.timeout(15_000) });
+      if (count == null || !Number.isSafeInteger(count) || count <= 0) throw new Error("invalid_token_count");
+      inputTokens = Math.max(inputTokens, count);
+    } catch {
+      return json({ error: "video_check_failed", conversationId: conversation.id }, 503);
+    }
+  }
 
   if (inputTokens > Math.min(model.contextTokens-model.maxOutputTokens,CONTEXT.maximumInputTokens)) {
-    return json({error:"context_too_large",conversationId:conversation.id},413);
+    return json({error: videos.length ? "video_too_large" : "context_too_large",conversationId:conversation.id},413);
   }
-  const callMetadata = {conversationId:conversation.id,provider,operation:"chat" as const,inputEstimate:inputTokens + videoTokens,
+  const callMetadata = {conversationId:conversation.id,provider,operation:"chat" as const,inputEstimate:inputTokens,
     contextTarget,historyDropped:ctx.dropped,retrievedCount:retrieval.count};
 
   // ---- reservation (live only)
   let maxOutput = voice ? Math.min(model.maxOutputTokens, VOICE_MAX_OUTPUT) : model.maxOutputTokens;
   if (live) {
-    let r = await reserve(user.id, requestId, model.id, "text", reservationMicros(model, inputTokens + videoTokens, maxOutput),callMetadata);
+    let r = await reserve(user.id, requestId, model.id, "text", reservationMicros(model, inputTokens, maxOutput),callMetadata);
     if (!r.ok && r.reason === "budget" && r.remaining) {
       // Shrink the reply to fit what's left, if that still allows a useful answer.
-      const fit = Math.min(maxOutput, maxOutputFor(model, inputTokens + videoTokens, r.remaining));
+      const fit = Math.min(maxOutput, maxOutputFor(model, inputTokens, r.remaining));
       if (fit >= 500) {
         maxOutput = fit;
-        r = await reserve(user.id, requestId, model.id, "text", reservationMicros(model, inputTokens + videoTokens, maxOutput),callMetadata);
+        r = await reserve(user.id, requestId, model.id, "text", reservationMicros(model, inputTokens, maxOutput),callMetadata);
       }
     }
     if (!r.ok) {

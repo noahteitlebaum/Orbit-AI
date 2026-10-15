@@ -67,3 +67,11 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done. Keep optional features of
 - [x] Synthetic regression tests and 20-case live evaluation pack in benchmarks/response-quality-cases.json
 - [ ] Run blind, repeated live quality/cost/latency comparisons across all providers before claiming improved model accuracy
 - [ ] Stage phone/desktop completion and continuation UX; confirm detailed finish-state persistence needs
+
+## Jake: merge-compatible context fixes (Oct 15)
+- [x] Reconcile Jake to current main without rewriting history; remove superseded context migration.
+- [x] Include full video input in the context ceiling and budget reservation; block unavailable counts.
+- [x] Recheck AI-memory consent and add transactional database enforcement (migration 0013).
+- [x] Gate unmatched attachment/scanned-page fallbacks and omit zero-match saved facts.
+- [ ] Apply 0013 to staging before deployment; validate a synthetic video and live preference changes.
+See JAKE_MERGE_FIXES.md for migration-order caveats and validation limits.

@@ -12,6 +12,9 @@ const state = vi.hoisted(() => ({
   events: [] as unknown[],
   failBeforeStart: false,
   reserveOk: true,
+  countInput: 3000 as number | undefined,
+  countFails: false,
+  disableMemoryDuringReply: false,
   lastArgs: null as null | { system: string; history: { role: string; content: string; images?: unknown[]; toolCalls?: unknown[]; toolResults?: unknown[] }[]; tools?: { name: string }[] },
 }));
 
@@ -31,10 +34,19 @@ vi.mock("@/lib/providers", () => ({
   liveFor: () => state.live && state.key !== null,
   apiKeyFor: () => state.key,
   ADAPTERS: {
+    google: {
+      id: "google",
+      countTokens: vi.fn(async () => { if (state.countFails) throw new Error("count failed"); return state.countInput; }),
+      async *stream(args: { system: string; history: { role: string; content: string }[] }): AsyncGenerator<StreamEvent> {
+        state.lastArgs = args;
+        for (const e of state.events as StreamEvent[]) yield e;
+      },
+    },
     anthropic: {
       id: "anthropic",
       async *stream(args: { system: string; history: { role: string; content: string }[]; tools?: { name: string }[] }): AsyncGenerator<StreamEvent> {
         state.lastArgs = args;
+        if (state.disableMemoryDuringReply) state.fake!.db.profiles[0].memory_enabled = false;
         if (state.failBeforeStart) throw new ProviderError("unavailable", 503);
         for (const e of state.events as StreamEvent[]) yield e;
       },
@@ -57,6 +69,10 @@ beforeEach(() => {
   state.key = "k";
   state.failBeforeStart = false;
   state.reserveOk = true;
+  state.countInput = 3000;
+  state.countFails = false;
+  state.disableMemoryDuringReply = false;
+  state.lastArgs = null;
   state.events = [{ delta: "Hi " }, { delta: "there" }, { usage: { input: 1000, output: 100, reasoning: 0, cached: 0 } }];
   vi.clearAllMocks();
 });
@@ -339,7 +355,7 @@ describe("code execution", () => {
 });
 
 describe("profile and memory", () => {
-  const profile = { display_name: "Noah", program: "BSc CS", level: "2nd year", style: "concise", length: "", about: "", instructions: "Use SI units.", memory_enabled: false };
+  const profile = { user_id: "user-1", display_name: "Noah", program: "BSc CS", level: "2nd year", style: "concise", length: "", about: "", instructions: "Use SI units.", memory_enabled: false };
   const ask = () => POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "I'm taking STATS 2244, remember that" }));
 
   it("puts the student's profile in the prompt", async () => {
@@ -519,4 +535,59 @@ describe("response completion quality",()=>{
     expect(events.some(e=>e.t==="tool_calls")).toBe(false);
     expect(events.at(-1)).toMatchObject({status:"partial"});
   });
+});
+
+
+describe("video input cost guard", () => {
+  const askVideo = () => POST(req({ provider: "google", modelId: "google-default", content: "Explain https://youtu.be/dQw4w9WgXcQ" }));
+  it("blocks over-limit video input before reserving or generating an answer", async () => {
+    state.live = true; state.countInput = 24001;
+    const res = await askVideo();
+    expect(res.status).toBe(413); expect(await res.json()).toMatchObject({error:"video_too_large"});
+    expect(budget.reserve).not.toHaveBeenCalled(); expect(state.lastArgs).toBeNull();
+  });
+  it.each([undefined, NaN, -1, 1.5])("fails closed when video count is invalid: %s", async count => {
+    state.live = true; state.countInput = count;
+    const res = await askVideo();
+    expect(res.status).toBe(503); expect(await res.json()).toMatchObject({error:"video_check_failed"});
+    expect(budget.reserve).not.toHaveBeenCalled(); expect(state.lastArgs).toBeNull();
+  });
+  it("fails closed on count service failure", async () => {
+    state.live = true; state.countFails = true;
+    expect((await askVideo()).status).toBe(503);
+    expect(budget.reserve).not.toHaveBeenCalled(); expect(state.lastArgs).toBeNull();
+  });
+  it("reserves using the counted full input for an allowed video", async () => {
+    state.live = true; state.countInput = 12000;
+    const res = await askVideo(); expect(res.status).toBe(200); await readEvents(res);
+    expect(budget.reserve).toHaveBeenCalledWith("user-1",expect.any(String),"google-default","text",expect.any(Number),expect.objectContaining({inputEstimate:12000}));
+    expect(state.lastArgs).not.toBeNull();
+  });
+});
+
+it("does not save an AI memory when consent changes during the streamed reply", async () => {
+  state.live = true;
+  state.fake!.db.profiles = [{user_id:"user-1",memory_enabled:true}];
+  state.disableMemoryDuringReply = true;
+  state.events = [{delta:"Noted.\n[[remember: Studies chemistry]]"},{usage:{input:10,output:5,reasoning:0,cached:0}}];
+  const ev = await readEvents(await POST(req({provider:"anthropic",modelId:"anthropic-default",content:"Remember I study chemistry"})));
+  expect(ev.at(-1).remembered).toBeUndefined(); expect(state.fake!.db.memories??[]).toEqual([]);
+});
+
+it("keeps the shared image cap when attachment images precede the recent exchanges", async () => {
+  state.live = true;
+  const conversationId = "66666666-6666-4666-8666-666666666666";
+  state.fake!.db.conversations.push({id:conversationId,user_id:"user-1",provider:"anthropic",title:"Images",project_id:"course",mode:"chat",course_only:false,summary:null,summary_upto:null});
+  state.fake!.db.projects.push({id:"course",name:"Biology",instructions:""});
+  const attachedIds = [];
+  for (let i=0;i<8;i++) {
+    const id=crypto.randomUUID(), path=`u/image-${i}.png`;
+    if(i<4) attachedIds.push(id);
+    state.fake!.db.files.push({id,name:`cells ${i}.png`,kind:"image",status:"ready",conversation_id:i<4?conversationId:null,project_id:i<4?null:"course",storage_path:path,mime:"image/png"});
+    state.fake!.storage[path]={bytes:new Uint8Array([1,2]),type:"image/png"};
+  }
+  state.fake!.db.messages.push({id:"old-image-question",conversation_id:conversationId,seq:-100,role:"user",content:"Previous image question",attachment_ids:attachedIds,status:"complete",kind:"text"});
+  for(let i=0;i<12;i++) state.fake!.db.messages.push({id:`short-${i}`,conversation_id:conversationId,seq:i-99,role:i%2?"user":"assistant",content:"A short exchange",attachment_ids:[],status:"complete",kind:"text"});
+  await readEvents(await POST(req({provider:"anthropic",modelId:"anthropic-default",conversationId,content:"Label cells"})));
+  expect(state.lastArgs!.history.reduce((n,t)=>n+(t.images?.length??0),0)).toBeLessThanOrEqual(4);
 });

@@ -83,3 +83,25 @@ describe('financial SQL and RLS',()=>{
    expect((await db.query('select * from public.context_embeddings')).rows).toHaveLength(0);
  });
 });
+
+
+it("atomically blocks AI-memory inserts after opt-out while allowing manual notes", async () => {
+  const W="55555555-5555-4555-8555-555555555555";
+  await db.exec(`insert into auth.users values('${W}','synthetic3@uwo.ca',now());
+    insert into public.profiles(user_id,memory_enabled) values('${W}',true);
+    set role authenticated; select set_config('app.user_id','${W}',false);`);
+  try {
+    const insert=async(source:string,content:string)=>(await db.query(`insert into public.memories(user_id,source,content) values($1,$2,$3) returning id`,[W,source,content])).rows;
+    expect(await insert('ai','Enabled memory')).toHaveLength(1);
+    await db.exec(`update public.profiles set memory_enabled=false where user_id='${W}'`);
+    expect(await insert('ai','Late streamed memory')).toHaveLength(0);
+    expect(await insert('student','Manual note')).toHaveLength(1);
+    expect((await db.query(`select * from public.memories where user_id=$1 and content='Late streamed memory'`,[W])).rows).toHaveLength(0);
+    await db.exec(`update public.profiles set memory_enabled=true where user_id='${W}'`);
+    expect(await insert('ai','Enabled again')).toHaveLength(1);
+    await expect(db.query(`insert into public.memories(user_id,source,content,conversation_id) values($1,'ai','Foreign chat',$2)`,[W,C])).rejects.toThrow(/invalid memory conversation/);
+    await db.exec(`delete from public.profiles where user_id='${W}'`);
+    expect(await insert('ai','No profile')).toHaveLength(0);
+    await expect(db.exec(`insert into public.memories(user_id,source,content) values('${V}','ai','Cross user')`)).rejects.toThrow(/row-level security/);
+  } finally { await db.exec('reset role'); }
+});

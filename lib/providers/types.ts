@@ -59,6 +59,7 @@ export interface GeneratedImage {
 export interface ProviderAdapter {
   id: ProviderId;
   stream(args: StreamArgs): AsyncIterable<StreamEvent>;
+  countTokens?(args: StreamArgs): Promise<number>; // preflight only, no generation
   generateImage?(args: ImageArgs): Promise<GeneratedImage>;
 }
 
