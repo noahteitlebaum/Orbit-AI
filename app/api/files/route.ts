@@ -1,3 +1,4 @@
+import { trackEvent } from "@/lib/analytics/events";
 import { dbError, isUuid, json, requireAppUser } from "@/lib/api";
 import { DOC_TYPES, IMAGE_TYPES, MAX_DOC_BYTES, MAX_IMAGE_BYTES, UNSUPPORTED_HINTS, detectMime, extractDocument, looksLikeText } from "@/lib/files/extract";
 
@@ -131,5 +132,6 @@ async function handleUpload(request: Request): Promise<Response> {
       return json({ file: { ...toSummary(row), status: "failed", error: "We couldn't index this file." } });
     }
   }
+  await trackEvent(user.id,"file_uploaded",{feature:row.kind as string},undefined,`file:${id}`);
   return json({ file: toSummary(row) });
 }

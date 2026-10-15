@@ -118,3 +118,13 @@ export async function saveMemories(supabase: SupabaseClient, userId: string, con
     .select("id, content, source, created_at");
   return (data ?? []) as Memory[];
 }
+
+/** Cheap fallback when semantic retrieval is off: bounded relevant memories, never the entire 100-item list. */
+export function relevantMemories(memories: Memory[], question: string, tokenBudget = 600): Memory[] {
+  const words = new Set(question.toLowerCase().match(/[a-z0-9]{3,}/g) ?? []);
+  const ranked = memories.map((m,i)=>({m,i,score:(m.content.toLowerCase().match(/[a-z0-9]{3,}/g)??[]).filter(w=>words.has(w)).length}))
+    .sort((a,b)=>b.score-a.score || a.i-b.i);
+  const out: Memory[] = []; let used=0;
+  for(const {m} of ranked) { const n=Math.ceil(m.content.length/3)+6; if(used+n>tokenBudget) continue; out.push(m); used+=n; if(out.length>=12)break; }
+  return out;
+}

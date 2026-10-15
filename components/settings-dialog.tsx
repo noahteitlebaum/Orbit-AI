@@ -1,14 +1,16 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import type { ProviderId } from "@/config/models";
+import { ImportHistory } from "./import-history";
 import { emptyProfile, LENGTHS, LIMITS, STYLES, type Memory, type Profile } from "@/lib/profile/personal";
 
 // Settings: the student's profile (used by every AI app), saved memories they can see and delete,
 // and a shortcut to each course's own instructions.
-export type SettingsTab = "profile" | "memory" | "courses";
+export type SettingsTab = "profile" | "memory" | "courses" | "import";
 const LEVELS = ["", "1st year", "2nd year", "3rd year", "4th year", "5th year+", "Graduate (Master's)", "Graduate (PhD)", "Other"];
 
-export function SettingsDialog({ open, tab: initialTab, onClose, email, appName, courses, onOpenCourse, memoryVersion }: {
+export function SettingsDialog({ open, tab: initialTab, onClose, email, appName, courses, onOpenCourse, memoryVersion, onImported }: {
   open: boolean;
   tab?: SettingsTab;
   onClose: () => void;
@@ -16,6 +18,7 @@ export function SettingsDialog({ open, tab: initialTab, onClose, email, appName,
   appName: string;
   courses: { id: string; name: string; instructions: string }[];
   onOpenCourse: (id: string) => void;
+  onImported?: (provider: ProviderId) => void; // chats were imported into this app: reload its list
   memoryVersion?: number; // bumps when the AI saves a memory, so an open list reloads
 }) {
   const ref = useRef<HTMLDialogElement>(null);
@@ -121,7 +124,7 @@ export function SettingsDialog({ open, tab: initialTab, onClose, email, appName,
       <div className="flex h-full flex-col sm:flex-row">
         <nav className="flex shrink-0 gap-1 border-b border-line p-3 sm:w-44 sm:flex-col sm:border-b-0 sm:border-r" aria-label="Settings sections">
           <h2 className="hidden px-3 pb-2 pt-1 text-lg font-medium sm:block">Settings</h2>
-          {([["profile", "Profile"], ["memory", "Memory"], ["courses", "Courses"]] as const).map(([key, text]) => (
+          {([["profile", "Profile"], ["memory", "Memory"], ["courses", "Courses"], ["import", "Import"]] as const).map(([key, text]) => (
             <button key={key} type="button" onClick={() => { setTab(key); setStatus(null); }} aria-current={tab === key ? "page" : undefined}
               className={`rounded-xl px-3 py-2 text-left text-sm ${tab === key ? "bg-surface-300 font-medium" : "text-ink-muted hover:bg-surface-200"}`}>
               {text}
@@ -201,8 +204,9 @@ export function SettingsDialog({ open, tab: initialTab, onClose, email, appName,
                 <span>
                   <span className="block text-sm font-medium">Use memory</span>
                   <span className="block text-xs text-ink-subtle">
-                    The AI reads these notes in every chat and can save new ones when you tell it something lasting (it will say when it does).
-                    Off: nothing below is used and nothing new is saved.
+                    The AI uses relevant saved notes and can save new ones when you tell it something lasting.
+                    When semantic search is enabled, earlier chat excerpts and saved notes are sent to OpenAI to find relevant context.
+                    Turning this off stops saved-memory use and semantic search and removes search vectors; your saved notes and chat history remain.
                   </span>
                 </span>
               </label>
@@ -244,6 +248,8 @@ export function SettingsDialog({ open, tab: initialTab, onClose, email, appName,
               )}
             </div>
           )}
+
+          {tab === "import" && <ImportHistory onImported={(p) => onImported?.(p)} />}
 
           {tab === "courses" && (
             <div>

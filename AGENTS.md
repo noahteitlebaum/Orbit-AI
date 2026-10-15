@@ -3,7 +3,7 @@
 Read this first in every AI session. Also read `docs/PRODUCT_SPEC.md`, `docs/ARCHITECTURE.md`, and `docs/TASKS.md`. If anything here conflicts with a direct instruction from Noah, follow Noah and update this file.
 
 ## What this is
-A mobile-friendly web app that gives verified @uwo.ca students one place to use OpenAI, Anthropic (Claude), Google (Gemini) and xAI (Grok). Each AI app (ChatGPT, Claude, Gemini, Grok) has its own chat list; inside a chat, students can switch between that app's models and keep the context. Chats and courses never carry over between apps: each app has its own chats and its own courses (Noah, Oct 2026). **Launch: Monday Oct 19 2026.**
+A mobile-friendly web app that gives verified @uwo.ca students one place to use OpenAI, Anthropic (Claude), Google (Gemini) and xAI (Grok). Each AI app (ChatGPT, Claude, Gemini, Grok) has its own chat list and courses. Per Jake's October 13 request, the composer model picker now explicitly selects models across providers within a saved chat. The original app remains the chat/course home; the selected provider receives the shared visible history and summary. Sidebar tabs still open separate chat lists. **Launch: Monday Oct 19 2026.**
 
 ## Stack (provisional; change it here if it changes)
 - Next.js (App Router) + TypeScript + Tailwind
@@ -53,8 +53,23 @@ npm run test:live  # small opt-in live checks against all 4 providers (costs mon
 - Profile and memories are per student, shared by all four apps; course instructions stay per app and win on conflicts.
 - Memory is off by default. When on, memories go in the prompt and the AI can save one with a hidden `[[remember: …]]` line (removed by the server, saved with source "ai", shown under the answer as "Memory updated"). Students can add, see and delete every memory; max 100, 300 chars each.
 
+## Voice (config/voice.ts)
+- Mic button in the message box: record (max 5 min) → `POST /api/transcribe` → OpenAI `gpt-4o-mini-transcribe` (needs OPENAI_API_KEY; works in all four apps) → text lands in the box to check before sending. Course name sent as a vocabulary hint. Nothing stored.
+- Billing like web search: reserve $0.006/min, settle $0.003/min (length = max of browser timer and file size), failures not charged. Demo mode: no transcription.
+- "Listen" under each answer reads it with the browser's own voices (free; citations/code skipped, simple math spoken).
+- Voice conversation (waveform button → `components/voice-mode.tsx`): turn-based, works with all four apps. Mic stays open; `lib/voice/listener.ts` detects when the student stops talking (VAD: level vs background noise, 1 s of quiet), transcribes, sends a normal chat message with `voice: true` (VOICE_PROMPT: short, speakable, no Markdown), and `lib/voice/speaker.ts` speaks finished sentences while the reply streams, then listens again. Tap the circle to finish talking or interrupt. Everything is saved in the chat as text.
+- Spoken replies (`/api/speak`, `lib/voice/tts.ts`): ElevenLabs Flash v2.5 if ELEVENLABS_API_KEY is set, else OpenAI gpt-4o-mini-tts (voice "marin"), else browser voices. Billed per character (ledger id `voice-speak`, not counted in the rate limit); a failed request isn't charged and that sentence falls back to the browser voice. The speaker fetches the next sentences' audio while one plays. "Listen" uses the same voice.
+- Fillers (`lib/voice/fillers.ts`): when the student stops talking (85% of turns) the AI says a short filler ("Hmm…", "Okay, um…"), and a longer one after 3.2 s with no answer yet ("Uh, give me a second…"); never the same twice in a row. Audio is made once per voice via `/api/speak` and kept in the browser's Cache Storage, so it plays instantly; with cloud voices a filler that isn't ready is skipped (never a different voice). Fillers aren't added to the chat text.
+- Speed in voice turns: low reasoning/thinking (OpenAI `reasoning.effort: low`, Gemini `thinkingLevel: low`, retried without if a model rejects it), replies capped at 1,200 tokens, no tools, turn ends after 1 s of quiet, profile loaded in parallel.
+
+## Integrations (Jake's memo, Oct 12 2026) — see docs/INTEGRATIONS.md
+Built: + → "Add from apps": GitHub (public links or device sign-in), Google Drive, OneDrive, Outlook/Gmail (search, tick ≤10), Outlook/Google Calendar (next 7–30 days), Notion (`/api/notion` relay, token stays in the tab), Zotero (student key; APA + notes + BibTeX), YouTube (Gemini watches the link; `ChatTurn.videos`). Plus history import, Anki/Quizlet export and Word/PowerPoint/Excel downloads (`lib/export/office.ts`). Connectors live in `lib/connectors/`, are read-only, keep tokens in the browser, and bundle picks into one Markdown file that goes through the normal upload path. Apps without keys show "Not set up". Brightspace, Teams, Discord and Canva wait on approvals (see the doc).
+
+## Deferred until after launch (item 12, Noah, Oct 12 2026)
+Deep research and new image-generation work wait (integrations were later built read-only on Noah's request, Oct 12–13 — see above) until the core study workflow is reliable with real students: they add cost and complexity without fixing the main reasons students switch. Image generation stays as it is (Gemini, Grok; OpenAI once its price is set) — no new image features. Revisit after launch using usage data; a first candidate is read-only OWL/Brightspace course import, since it feeds the course-files workflow students already use.
+
 ## Out of scope for launch (don't build unless the team agrees)
-Model comparison, smart model routing, connectors (Drive/GitHub…), coding/computer agents beyond folder access, voice.
+Model comparison, smart model routing, coding/computer agents beyond folder access, write access to students' apps.
 **Built (Noah + Jake's backend memo, Oct 2026):** file/image uploads — PDF, Word, PowerPoint (per slide), Excel/CSV (per sheet, as rows), notebooks, code and any text file; phone photos are shrunk/converted in the browser — with page references (PDF pages that are scanned or have diagrams are read visually by ChatGPT/Claude/Gemini, a few per question; pictures in Word files, skipped pages and unmatched course images are named to the model, never silently dropped), courses (one app each: instructions + reusable files), grounded answers with [S#] sources and a "use only my course material" switch, web search (Tavily, "Search the web" toggle; one search per question, charged against the allowance, saved on the question and reused across models; cited as [W#] with links, kept apart from course files [S#] — `lib/search/web.ts`, `config/search.ts`), study modes (explain / quiz me / hints; quiz score and missed concepts are kept by the server from hidden `[[quiz: right|wrong | concept]]` lines, saved per chat and reused across the course — `lib/chat/quiz.ts`), running summaries for long chats, low-balance warning with a cheaper-model offer, image generation (Gemini, Grok; OpenAI once its price is set). **Folder access (Noah, Oct 11 2026):** students can connect one folder on their computer with the browser's folder picker (File System Access API, Chrome/Edge; nothing to install; `lib/folder/browser-fs.ts`); all four AIs can list/read/search and write/edit/move/delete files there; changes need the student's Apply unless they chose "Don't ask for edits" (deletes always ask). Everything that calls a model goes through the same reserve → call → settle budget path, including each round of a file-action reply.
 
 ## Where things live (server)
@@ -85,10 +100,28 @@ Model comparison, smart model routing, connectors (Drive/GitHub…), coding/comp
 ## UI theme
 All styling uses the Orbit AI design system ("Orbit Night" dark default, "Orbit Day" light), defined as CSS variables in `app/globals.css` and exposed as Tailwind utilities (`bg-surface-100`, `text-ink-muted`, `border-line`, `bg-brand`, `text-on-brand`, `bg-provider-anthropic`, `shadow-card`…). Never use Tailwind palette colors (zinc, red…) or raw hex in components. Brand pieces (`Wordmark`, `OrbitBackdrop`, `ProviderDot`) live in `components/brand.tsx`; logo PNGs in `public/brand/`. Provider colors are dots beside the model name.
 
-**Chat themes (Noah's decision, Oct 2026):** the chat screen has a left rail with each AI app's logo (ChatGPT, Claude, Gemini, Grok). Picking one opens that app's own chat list and re-skins the chat to look like that app: `data-theme="<provider>"` on the chat root re-points the tokens (colors, fonts) in `app/globals.css`; layout differences (greeting, composer/bubble shapes, reply font, disclaimer) live in `config/themes.ts`. The model menu in the message box (`components/model-menu.tsx`) lists only that app's models from `config/models.ts`. Logos are files in `public/providers/` set via `logo` in `config/themes.ts`. Auth pages and the rest of the app stay on Orbit Night/Day.
+**Chat themes (Noah's decision, Oct 2026):** the chat screen has a left rail with each AI app's logo (ChatGPT, Claude, Gemini, Grok). Picking one opens that app's own chat list and re-skins the chat to look like that app: `data-theme="<provider>"` on the chat root re-points the tokens (colors, fonts) in `app/globals.css`; layout differences (greeting, composer/bubble shapes, reply font, disclaimer) live in `config/themes.ts`. The model menu in the message box (`components/model-menu.tsx`) lists all enabled models from `config/models.ts`; explicit selection can continue a chat with another provider. Logos are files in `public/providers/` set via `logo` in `config/themes.ts`. Auth pages and the rest of the app stay on Orbit Night/Day.
 
-## Smart context (Oct 15, Jake)
-`config/context.ts` defines an ~8k ordinary input target, a 24k expansion ceiling, up to six recent exchanges,
-bounded local lexical retrieval and memory selection. Full history stays saved. Summary expenses have ledger kind
-`summary`; embedding expense is zero (no embeddings yet). Migration 0009 is required before deployment.
-Read the updated Context policy in `docs/ARCHITECTURE.md` before editing selection, caching or cost accounting.
+## Jake phase-one context/analytics work (October 13, 2026)
+- Read `docs/SMART_MEMORY_ANALYTICS.md` for audit, priorities, staging rollout, definitions, benchmark assumptions and remaining risks.
+- Budget wrappers now require migration 0009 v2 RPCs. USD ledger expenses/charges stay separate; CAD trial allowances use a configured, period-snapshot `settings.usd_cad_rate`. No implicit FX quote. Existing tester budgets are preserved.
+- Optional semantic retrieval requires migration 0010, `SMART_MEMORY_ENABLED=on` and the student's memory opt-in. It stays inside the current chat plus saved memories; disabling memory purges derived vectors.
+- Staff dashboard: `/admin/analytics`, migration 0011, `ANALYTICS_ADMIN_EMAILS` server allowlist. Events contain metadata only. Receipt schema exists; payment ingestion/renewal remain deferred and payments disabled.
+- `npm run benchmark:context` measures synthetic estimated payload cost, not live answer quality. `npm run typecheck` generates Next route types before compiling on a clean clone.
+
+## Response quality (October 13)
+- `config/quality.ts` contains the shared student response contract. Preserve requested format/mode, latest user corrections and honest source/tool use.
+- Named file/page evidence precedes old attachment filler. Missing requested pages must be disclosed; never substitute a different page silently.
+- Provider adapters emit finish reasons. Output-limit replies are partial; an SSE stream without a terminal signal is an explicit error. Incomplete replies/summaries must not commit memory/quiz/checkpoint updates or execute unfinished tools.
+- `docs/RESPONSE_QUALITY.md` and the 20 synthetic evaluation cases distinguish structural regression tests from live response quality. No additional reviewer call per ordinary answer.
+- Live evaluation: `npm run eval:quality` (vitest.eval.config.mts → `benchmarks/quality.eval.ts`, helpers + checks in `lib/eval/quality.ts`). Runs the 16 prompt-runnable cases, baseline (no response contract) vs candidate, on every app with a key (`EVAL_PROVIDERS`, `EVAL_MODELS`, `EVAL_REPEAT`, default 3). Writes `benchmarks/results/` (git-ignored): JSON, a blind review CSV and a separate key. Costs real credits.
+
+<!-- BEGIN:nextjs-agent-rules -->
+
+# This is NOT the Next.js you know
+
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
+<!-- END:nextjs-agent-rules -->

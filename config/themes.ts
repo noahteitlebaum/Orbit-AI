@@ -11,12 +11,19 @@ export interface ProviderTheme {
   inlineComposer?: boolean; // model menu + send on the same row as the input (Gemini)
   disclaimer: string;
   greeting: string;
+  /** Greeting once we know the student's first name (hour = local hour, 0–23). */
+  greetingFor?: (name: string, hour: number) => string;
+  greetingLogo?: boolean; // the app's mark before the greeting (Claude)
+  replyAvatar?: boolean;  // the app's mark beside each reply (Gemini)
   greetingClass: string;
+  chipClass: string;    // starter suggestions under the empty-chat composer
   composerClass: string;
   sendClass: string;
   userBubbleClass: string;
   replyClass: string;
 }
+
+const timeOfDay = (h: number) => (h < 5 ? "Evening" : h < 12 ? "Morning" : h < 18 ? "Afternoon" : "Evening");
 
 export const THEMES: Record<ProviderId, ProviderTheme> = {
   openai: {
@@ -27,7 +34,8 @@ export const THEMES: Record<ProviderId, ProviderTheme> = {
     itemClass: "rounded-lg",
     disclaimer: "ChatGPT can make mistakes. Check important info.",
     greeting: "What can I help with?",
-    greetingClass: "text-[28px] font-normal tracking-tight",
+    chipClass: "rounded-full border border-line px-3.5 py-2 text-sm text-ink-muted hover:bg-surface-200 hover:text-ink",
+    greetingClass: "text-[24px] font-normal tracking-tight sm:text-[28px]",
     composerClass: "rounded-[28px] border border-line bg-composer shadow-composer",
     sendClass: "h-9 w-9 rounded-full",
     userBubbleClass: "rounded-3xl bg-bubble px-5 py-2.5",
@@ -40,7 +48,10 @@ export const THEMES: Record<ProviderId, ProviderTheme> = {
     itemClass: "rounded-lg",
     disclaimer: "Claude can make mistakes. Please double-check responses.",
     greeting: "How can I help you today?",
-    greetingClass: "font-display text-[40px] font-light tracking-tight",
+    greetingFor: (name, h) => `${timeOfDay(h) === "Morning" ? "Good morning" : timeOfDay(h) === "Afternoon" ? "Good afternoon" : "Good evening"}, ${name}`,
+    greetingLogo: true,
+    chipClass: "rounded-lg border border-line bg-surface-000 px-3 py-1.5 text-sm text-ink-muted hover:border-line-strong hover:text-ink",
+    greetingClass: "font-display text-[30px] font-light tracking-tight sm:text-[40px]",
     composerClass: "rounded-[20px] border border-line bg-composer shadow-composer",
     sendClass: "h-8 w-8 rounded-lg",
     userBubbleClass: "rounded-xl bg-bubble px-4 py-2.5",
@@ -54,7 +65,10 @@ export const THEMES: Record<ProviderId, ProviderTheme> = {
     inlineComposer: true,
     disclaimer: "Gemini is AI and can make mistakes.",
     greeting: "Hello there",
-    greetingClass: "gemini-gradient text-[44px] font-medium tracking-tight",
+    greetingFor: (name) => `Hello, ${name}`,
+    replyAvatar: true,
+    chipClass: "rounded-full bg-surface-200 px-4 py-2 text-sm text-ink hover:bg-surface-300",
+    greetingClass: "gemini-gradient text-[34px] font-medium tracking-tight sm:text-[44px]",
     composerClass: "rounded-[36px] border border-transparent bg-composer shadow-composer",
     sendClass: "h-10 w-10 rounded-full",
     userBubbleClass: "rounded-[24px] rounded-tr-md bg-bubble px-5 py-3",
@@ -68,7 +82,9 @@ export const THEMES: Record<ProviderId, ProviderTheme> = {
     itemClass: "rounded-xl",
     disclaimer: "Grok can make mistakes. Verify important information.",
     greeting: "What do you want to know?",
-    greetingClass: "text-[32px] font-medium tracking-tight",
+    greetingFor: (name, h) => `Good ${timeOfDay(h).toLowerCase()}, ${name}.`,
+    chipClass: "rounded-full border border-line-strong px-3.5 py-2 text-sm text-ink-muted hover:bg-surface-200 hover:text-ink",
+    greetingClass: "text-[26px] font-medium tracking-tight sm:text-[32px]",
     composerClass: "rounded-[28px] border border-line-strong bg-composer",
     sendClass: "h-9 w-9 rounded-full",
     userBubbleClass: "rounded-3xl rounded-br-lg border border-line bg-bubble px-5 py-2.5",

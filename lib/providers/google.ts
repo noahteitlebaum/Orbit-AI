@@ -1,5 +1,5 @@
 import { readSse } from "./sse";
-import { decodeBase64, errorForStatus, normalizeTurns, parseArgs, ProviderError, toolSchema, type ChatTurn, type ProviderAdapter } from "./types";
+import { decodeBase64, errorForStatus, normalizeTurns, parseArgs, ProviderError, toolSchema, type FinishReason, type ChatTurn, type ProviderAdapter } from "./types";
 
 // Gemini API (streamGenerateContent over SSE) + native image generation.
 const BASE = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -28,6 +28,7 @@ function toContent(t: ChatTurn) {
     parts: [
       ...(t.documents ?? []).map((d) => ({ inlineData: { mimeType: d.mime, data: d.data } })),
       ...(t.images ?? []).map((i) => ({ inlineData: { mimeType: i.mime, data: i.data } })),
+      ...(t.videos ?? []).map((url) => ({ fileData: { fileUri: url } })), // public YouTube links
       { text: t.content || " " },
     ],
   };
@@ -36,22 +37,25 @@ function toContent(t: ChatTurn) {
 export const google: ProviderAdapter = {
   id: "google",
 
-  async *stream({ model, system, history, maxOutput, apiKey, signal, tools }) {
-    const res = await fetch(`${BASE}/${encodeURIComponent(model.apiModel)}:streamGenerateContent?alt=sse`, {
+  async *stream({ model, system, history, maxOutput, apiKey, signal, tools, fast }) {
+    const call = (lowThinking: boolean) => fetch(`${BASE}/${encodeURIComponent(model.apiModel)}:streamGenerateContent?alt=sse`, {
       method: "POST",
       headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
       body: JSON.stringify({
         systemInstruction: { parts: [{ text: system }] },
         contents: normalizeTurns(history).map(toContent),
         ...(tools?.length ? { tools: [{ functionDeclarations: tools.map(toolSchema) }] } : {}),
-        generationConfig: { maxOutputTokens: maxOutput },
+        generationConfig: { maxOutputTokens: maxOutput, ...(history.some((t) => t.videos?.length) ? { mediaResolution: "MEDIA_RESOLUTION_LOW" } : {}), ...(lowThinking ? { thinkingConfig: { thinkingLevel: "low" } } : {}) },
       }),
       signal,
     });
+    let res = await call(Boolean(fast));
+    if (fast && res.status === 400) res = await call(false); // a model without thinking settings: ask normally
     if (!res.ok || !res.body) throw errorForStatus(res.status);
 
     let usage: { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number; cachedContentTokenCount?: number } | undefined;
     let n = 0;
+    let finish:FinishReason|undefined;
     for await (const { data } of readSse(res.body)) {
       const ev = JSON.parse(data);
       if (ev.error) throw new ProviderError("unavailable", ev.error.code, true);
@@ -68,6 +72,9 @@ export const google: ProviderAdapter = {
           };
         } else if (part.text && !part.thought) yield { delta: part.text as string };
       }
+      const reason=ev.candidates?.[0]?.finishReason;
+      if(reason) finish=reason==="MAX_TOKENS"?"length":reason==="STOP"?(n?"tool_calls":"stop"):["SAFETY","RECITATION","BLOCKLIST","PROHIBITED_CONTENT","SPII","IMAGE_SAFETY","IMAGE_PROHIBITED_CONTENT"].includes(reason)?"blocked":"unknown";
+      if(ev.promptFeedback?.blockReason) finish="blocked";
       if (ev.usageMetadata) usage = ev.usageMetadata; // cumulative; the last one wins
     }
     if (usage) {
@@ -81,6 +88,8 @@ export const google: ProviderAdapter = {
         },
       };
     }
+    if(finish) yield {finish};
+    else throw new ProviderError("incomplete_stream",undefined,true);
   },
 
   async generateImage({ model, prompt, apiKey, signal }) {

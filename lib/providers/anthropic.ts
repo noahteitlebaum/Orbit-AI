@@ -1,5 +1,5 @@
 import { readSse } from "./sse";
-import { errorForStatus, normalizeTurns, parseArgs, ProviderError, type ChatTurn, type ProviderAdapter } from "./types";
+import { errorForStatus, normalizeTurns, parseArgs, ProviderError, type FinishReason, type ChatTurn, type ProviderAdapter } from "./types";
 
 // Anthropic Messages API (streaming, tool use). Claude has no image generation.
 
@@ -31,7 +31,7 @@ function toMessage(t: ChatTurn) {
 export const anthropic: ProviderAdapter = {
   id: "anthropic",
 
-  async *stream({ model, system, history, maxOutput, apiKey, signal, tools }) {
+  async *stream({ model, system, history, maxOutput, apiKey, signal, tools, cacheKey }) {
     const res = await fetch("https://api.anthropic.com/v1/messages", {
       method: "POST",
       headers: {
@@ -42,7 +42,8 @@ export const anthropic: ProviderAdapter = {
       body: JSON.stringify({
         model: model.apiModel,
         max_tokens: maxOutput,
-        system: [{ type: "text", text: system, cache_control: { type: "ephemeral" } }],
+        system,
+        ...(cacheKey ? { cache_control: { type: "ephemeral" } } : {}),
         messages: normalizeTurns(history).map(toMessage),
         ...(tools?.length ? { tools: tools.map((t) => ({ name: t.name, description: t.description, input_schema: t.parameters })) } : {}),
         stream: true,
@@ -55,6 +56,7 @@ export const anthropic: ProviderAdapter = {
     let cached = 0;
     let cacheWrite = 0;
     let output = 0;
+    let finish:FinishReason="unknown";
     const blocks = new Map<number, { id: string; name: string; json: string }>(); // tool_use blocks being streamed
     for await (const { data } of readSse(res.body)) {
       const ev = JSON.parse(data);
@@ -87,13 +89,16 @@ export const anthropic: ProviderAdapter = {
         }
         case "message_delta":
           if (ev.usage?.output_tokens != null) output = ev.usage.output_tokens;
+          if(ev.delta?.stop_reason) finish=ev.delta.stop_reason==="max_tokens"?"length":ev.delta.stop_reason==="refusal"?"blocked":ev.delta.stop_reason==="tool_use"?"tool_calls":["end_turn","stop_sequence"].includes(ev.delta.stop_reason)?"stop":"unknown";
           break;
         case "message_stop":
-          yield { usage: { input, output, reasoning: 0, cached, ...(cacheWrite ? { cacheWrite } : {}) } };
+          yield { usage: { input, output, reasoning: 0, cached, cacheWrite, reasoningReported: false } };
+          yield {finish};
           return;
         case "error":
           throw new ProviderError(ev.error?.type === "overloaded_error" ? "unavailable" : "unknown", undefined, true);
       }
     }
+    throw new ProviderError("incomplete_stream",undefined,true);
   },
 };

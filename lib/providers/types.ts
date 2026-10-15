@@ -9,19 +9,22 @@ export type TurnDocument = { name: string; mime: "application/pdf"; data: string
 export type ToolCall = { id: string; name: string; args: Record<string, unknown>; meta?: { thoughtSignature?: string; providerId?: boolean } };
 export type ToolResult = { id: string; name: string; output: string };
 // Assistant turns may carry toolCalls; the user turn after them carries the matching toolResults.
-export type ChatTurn = { role: "user" | "assistant"; content: string; images?: TurnImage[]; documents?: TurnDocument[]; toolCalls?: ToolCall[]; toolResults?: ToolResult[] };
+export type ChatTurn = { role: "user" | "assistant"; content: string; images?: TurnImage[]; documents?: TurnDocument[]; videos?: string[]; toolCalls?: ToolCall[]; toolResults?: ToolResult[] };
 
 export interface Usage {
   input: number;     // prompt tokens
   output: number;    // billable output tokens, including reasoning/thinking
   reasoning: number; // part of output spent on reasoning (for reporting)
-  cached: number;    // prompt tokens served from cache
-  cacheWrite?: number; // included in input; billed at the configured write rate
+  cached: number;    // cache READ tokens, subset of input
+  cacheWrite?: number; // cache WRITE tokens, disjoint subset of input
+  costUsdMicros?: number; // exact provider-reported cost when supplied
+  reasoningReported?: boolean; // false when provider does not expose a reasoning breakdown
 }
 
-export type StreamEvent = { delta?: string; usage?: Usage; toolCall?: ToolCall };
+export type FinishReason = "stop" | "length" | "blocked" | "tool_calls" | "unknown";
+export type StreamEvent = { delta?: string; usage?: Usage; toolCall?: ToolCall; finish?: FinishReason };
 
-export type ProviderErrorCode = "timeout" | "rate_limit" | "auth" | "unavailable" | "bad_request" | "model_unavailable" | "not_configured" | "unknown";
+export type ProviderErrorCode = "timeout" | "rate_limit" | "auth" | "unavailable" | "bad_request" | "model_unavailable" | "not_configured" | "incomplete_stream" | "unknown";
 
 export class ProviderError extends Error {
   constructor(public code: ProviderErrorCode, public status?: number, public started = false) {
@@ -36,8 +39,9 @@ export interface StreamArgs {
   maxOutput: number;
   apiKey: string;
   signal: AbortSignal;
-  cacheKey?: string; // opaque user + conversation IDs only
+  cacheKey?: string; // opaque user/conversation scope, never email or prompt text
   tools?: ToolDef[]; // folder tools, when the student connected a folder
+  fast?: boolean;    // voice conversations: think as little as possible so the reply starts sooner
 }
 
 export interface ImageArgs {

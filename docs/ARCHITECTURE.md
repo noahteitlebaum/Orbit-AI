@@ -39,57 +39,7 @@ interface ProviderAdapter {
 Each adapter maps roles to its own API format. For example, Anthropic and Google take the system prompt separately, and Google calls the assistant role `model`. Replies from other models are passed as `assistant` turns, in order.
 
 ## Context policy
-Full history stays in `messages`; prompt selection never deletes it. `config/context.ts` controls an approximately
-8,000-token input target (output budget is separate). Send up to six recent user exchanges where they fit, a running
-summary (1,500-token allowance), and up to 800 estimated tokens of matching older messages. Local lexical retrieval
-runs only over this conversation's ownership-checked/RLS-filtered rows. It is deterministic, requires shared words,
-and can miss semantic matches or oversized messages; it does not promise complete recall.
-
-Material uses 2,000 estimated tokens normally; explicit summarize/review/compare/whole-file requests can use 12,000.
-Older small attachments participate in keyword retrieval instead of being resent whole. Visual page limits still apply.
-A current task with large input, images, tool results, or material can expand the target to at most 24,000 estimated input
-tokens (also capped by the model configuration). Old history alone never triggers expansion. Reject oversized assembled
-input before the answer call. Estimates are approximate, especially for images; provider-reported tokens settle the bill.
-The UI discloses selection, omissions and potentially stale summaries; selected file passages are disclosed to the model.
-
-Summaries fold only newly omitted messages; an existing summary is refreshed after at least four newly omitted messages.
-There are at most four batch calls per request, with bounded transcripts. Failed or unaffordable refreshes retain the old
-summary, and never advance its saved position. Every summary call reserves and settles separately with ledger kind
-`summary`. The answer uses kind `text`; `embedding` is a distinct supported ledger category. **No embedding service or
-persistent embedding index is used in this version: embedding expense is zero.** Never add an embedding call without
-reserve/call/settle and a verified configured price. `recentAnswerCosts` excludes auxiliary calls.
-
-Saved memories are separately opted in via Settings. Only matching memories (up to 500 estimated tokens) enter a prompt;
-profile response preferences always apply. Memory loads and deletes use authenticated RLS. Each request reads current
-rows; no process cache or duplicate search index can retain deleted saved memories. Deleting a saved memory removes
-that memory, not the independently saved original conversation; deleting a chat removes its summary by cascade with
-its conversation row. Cross-chat history retrieval is not enabled. Memory-off disables saved-memory use and saving.
-
-Caching: OpenAI and xAI receive opaque per-user/per-conversation cache keys; Google uses implicit caching; Anthropic
-uses an ephemeral (5-minute) system-block breakpoint. Static system instructions precede variable material/summary.
-No explicit Google cache objects or storage charges are introduced. Cache hits are opportunistic; full-price misses and
-cache-write premiums are reserved up front. Usage separates reads and writes; actual cost uses verified cached-input
-rates in `config/models.ts`, falling back to full input price if unset. Provider cache lifetimes do not replace application
-deletion rules: subsequent requests rebuild prompts from current data.
-
-Apply **migration 0009 before deploying this code**: it adds auxiliary ledger categories and cache-write token accounting,
-and updates the server-only settlement RPC. Analytics contain only IDs, expense kind, token counts, money, status and
-error codes; never query message, summary, memory or prompt text for analytics. Expense example:
-
-```sql
-select kind, model_id, sum(actual_micros) as expense_micros,
-       sum(input_tokens) as input_tokens, sum(cached_tokens) as cache_reads,
-       sum(cache_write_tokens) as cache_writes
-from public.ledger where state = 'settled' group by kind, model_id;
-```
-
-Caching references checked Oct 15, 2026:
-- https://developers.openai.com/api/docs/guides/prompt-caching
-- https://developers.openai.com/api/docs/models/gpt-6-astra
-- https://developers.openai.com/api/docs/models/gpt-6-luna
-- https://platform.claude.com/docs/en/build-with-claude/prompt-caching
-- https://ai.google.dev/gemini-api/docs/caching
-- https://docs.x.ai/developers/models/grok-4.7
+Walk history from newest to oldest and keep messages until we hit `min(model.contextWindow, budgetCap) - maxOutput - safetyMargin`. Always keep the system prompt and the newest user message. If older messages were dropped, set a flag so the UI can show "Older messages not included."
 
 ## Data model (Postgres, RLS on every table)
 - `profiles(user_id, email, email_verified, plan, status)`
@@ -132,3 +82,11 @@ Chat requests send `folder: { name }`, and adapters pass the tools from `lib/fol
 function-calling format. A round that ends in tool calls streams `tool_calls`; the browser runs them on the folder
 (`lib/folder/browser-fs.ts`; changes need Apply unless "Don't ask for edits", deletes always ask; nothing extra is written
 into the folder) and continues the same reply with `run: { replyId, steps }`. Every round is its own reserve → call → settle.
+
+## Implemented phase-one update (October 13)
+The older `src/` diagram above describes the original scaffold. Current code is under root `app/`, `lib/` and `config/`.
+See [SMART_MEMORY_ANALYTICS.md](SMART_MEMORY_ANALYTICS.md) for the exact implementation and rollout.
+Economic input targets are separate from provider windows (8k ordinary, 16k files/tools, controlled expansion capped at 24k estimated input); summaries and recent exchanges stay provider-neutral.
+A saved conversation's provider field now identifies its sidebar/course home; model_id selects generation and may belong to another provider after an explicit model-picker choice.
+USD actual provider costs live in `ledger.actual_usd_micros`; `actual_micros` retains legacy budget-charge semantics. Unknown outcomes have no known provider cost. Money units are integer millionths of currency units, not micro-cents.
+New CAD trial budgets snapshot FX into USD credit counters and expire after their assigned trial. Paid subscriptions/renewals remain disabled.

@@ -31,8 +31,14 @@ export function liveProviders(env: Record<string, string | undefined> = process.
   return (Object.keys(KEY_ENV) as ProviderId[]).filter((p) => liveFor(p, env));
 }
 
+// Other names people commonly use for the same key.
+const KEY_ALIASES: Partial<Record<ProviderId, string[]>> = { anthropic: ["CLAUDE_API_KEY"], google: ["GOOGLE_API_KEY"] };
+
 /** The server-side API key for a provider, or null if it isn't set. Never send this to the client. */
 export function apiKeyFor(provider: ProviderId, env: Record<string, string | undefined> = process.env): string | null {
-  const v = env[KEY_ENV[provider]]?.trim();
-  return v ? v : null;
+  for (const name of [KEY_ENV[provider], ...(KEY_ALIASES[provider] ?? [])]) {
+    const v = env[name]?.trim();
+    if (v) return v;
+  }
+  return null;
 }

@@ -40,3 +40,8 @@ Verify email → start a chat → get a reply → switch model → ask a follow-
 - Which exact model from each provider is live at launch?
 - How many simultaneous users can we safely invite? (Measure this before launch.)
 - Who covers Oct 17–19, and when?
+
+## Current phase-one proposal and branch implementation
+Jake's October 13 brief proposes C$30/month, C$20 monthly API allowance, and a 7-day C$2.50 trial. Payments remain disabled pending final lifecycle rules.
+The composer can explicitly select a different provider while preserving the saved chat; the chat retains its original sidebar/course home. Long-chat economic limits, summaries and optional selective retrieval are disclosed and do not imply unlimited/perfect memory.
+[SMART_MEMORY_ANALYTICS.md](SMART_MEMORY_ANALYTICS.md) documents what is implemented, how to stage it and what still needs live validation.

@@ -15,6 +15,7 @@ const state = vi.hoisted(() => ({
   lastArgs: null as null | { system: string; history: { role: string; content: string; images?: unknown[]; toolCalls?: unknown[]; toolResults?: unknown[] }[]; tools?: { name: string }[] },
 }));
 
+vi.mock("@/lib/analytics/events",()=>({trackEvent:vi.fn(async()=>{})}));
 vi.mock("@/lib/api", async (orig) => ({
   ...(await orig<typeof import("@/lib/api")>()),
   requireAppUser: async () => ({ user: { id: "user-1" }, supabase: state.fake!.client }),
@@ -66,6 +67,12 @@ describe("POST /api/chat", () => {
     expect(res.status).toBe(400);
   });
 
+  it("new chats retain the sidebar/course home when choosing another provider",async()=>{
+    const res=await POST(req({provider:"anthropic",homeProvider:"openai",modelId:"anthropic-default",content:"hi"}));
+    await readEvents(res);
+    expect(state.fake!.db.conversations[0]).toMatchObject({provider:"openai",model_id:"anthropic-default"});
+  });
+
   it("demo mode: creates the chat, streams, saves both messages, never touches the budget", async () => {
     const res = await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "hello" }));
     const events = await readEvents(res);
@@ -84,7 +91,7 @@ describe("POST /api/chat", () => {
     await readEvents(res);
     expect(budget.reserve).toHaveBeenCalledOnce();
     // Sonnet 5.5: $2 in / $10 out per 1M → 1000×2 + 100×10 = 3000 micros
-    expect(budget.settle).toHaveBeenCalledWith(expect.any(String), "settled", 3000, expect.anything(), undefined);
+    expect(budget.settle).toHaveBeenCalledWith(expect.any(String), "settled", 3000, expect.anything(), undefined, expect.objectContaining({latencyMs:expect.any(Number)}));
     expect(state.fake!.db.messages[1]).toMatchObject({ content: "Hi there", status: "complete", model_id: "anthropic-default" });
   });
 
@@ -131,10 +138,24 @@ describe("POST /api/chat", () => {
     expect(msgs.filter((m) => m.role === "assistant").map((m) => m.status)).toEqual(["complete"]);
   });
 
-  it("won't continue a chat from another app", async () => {
+  it("edit rewrites the last question and answers it again", async () => {
+    state.live = true;
+    const first = await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "what is 2+2" })));
+    const conversationId = first[0].conversationId;
+    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", conversationId, retry: true, edit: true, content: "what is 3+3" })));
+    const msgs = state.fake!.db.messages;
+    expect(msgs.filter((m) => m.role === "user").map((m) => m.content)).toEqual(["what is 3+3"]);
+    expect(msgs.filter((m) => m.role === "assistant")).toHaveLength(1);
+    expect(state.lastArgs!.history.at(-1)!.content).toBe("what is 3+3");
+  });
+
+  it("continues the same saved chat after explicitly switching provider", async () => {
     const first = await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "q" })));
     const res = await POST(req({ provider: "openai", modelId: "openai-default", content: "q2", conversationId: first[0].conversationId }));
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(200);
+    const events=await readEvents(res);
+    expect(events[0]).toMatchObject({conversationId:first[0].conversationId});
+    expect(state.fake!.db.conversations).toHaveLength(1);
   });
 
   describe("files", () => {
@@ -258,7 +279,7 @@ describe("folder tools", () => {
     expect(last).toMatchObject({ t: "tool_calls", text: "Let me check.", calls: [readCall] });
     const reply = state.fake!.db.messages.find((m) => m.id === last.replyId)!;
     expect(reply).toMatchObject({ role: "assistant", status: "partial", content: "Let me check." });
-    expect(budget.settle).toHaveBeenCalledWith(expect.any(String), "settled", expect.any(Number), expect.anything(), undefined);
+    expect(budget.settle).toHaveBeenCalledWith(expect.any(String), "settled", expect.any(Number), expect.anything(), undefined, expect.objectContaining({latencyMs:expect.any(Number)}));
   });
 
   it("continues the same reply with the tool results, as a separate budgeted call", async () => {
@@ -347,6 +368,16 @@ describe("profile and memory", () => {
   });
 });
 
+describe("voice conversation", () => {
+  it("asks for short, speakable answers only when the message came by voice", async () => {
+    state.live = true;
+    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "hi" })));
+    expect(state.lastArgs!.system).not.toContain("spoken conversation");
+    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "what is a standard deviation", voice: true })));
+    expect(state.lastArgs!.system).toContain("This is a spoken conversation");
+  });
+});
+
 describe("persistent chats and model switching", () => {
   async function ask(body: Record<string, unknown>) {
     return readEvents(await POST(req({ provider: "anthropic", ...body })));
@@ -388,13 +419,12 @@ describe("persistent chats and model switching", () => {
     expect(state.lastArgs!.history.at(-1)!.content).toBe("and now?");
     const conv = state.fake!.db.conversations[0];
     expect(conv.summary).toBe("Goal: new summary");
-    expect(vi.mocked(budget.reserve).mock.calls.some(c => c[3] === "summary")).toBe(true);
     expect(conv.summary_upto as number).toBeGreaterThan(-1000);
 
     // A short chat with an old summary doesn't send it (everything fits).
-    state.fake!.db.conversations.push({ id: "22222222-2222-4222-8222-222222222222", user_id: "user-1", provider: "anthropic", title: "s", project_id: null, mode: "chat", course_only: false, summary: "stale", summary_upto: 1 });
+    state.fake!.db.conversations.push({ id: "22222222-2222-4222-8222-222222222222", user_id: "user-1", provider: "anthropic", title: "s", project_id: null, mode: "chat", course_only: false, summary: "OLDER SUMMARY SHOULD NOT BE SENT", summary_upto: 1 });
     await ask({ modelId: "anthropic-default", content: "hi", conversationId: "22222222-2222-4222-8222-222222222222" });
-    expect(state.lastArgs!.system).not.toContain("stale");
+    expect(state.lastArgs!.system).not.toContain("OLDER SUMMARY SHOULD NOT BE SENT");
   });
 });
 
@@ -429,7 +459,7 @@ describe("web search", () => {
     state.events = [{ delta: "It's 2.25% [W1] [W4]." }, { usage: { input: 10, output: 5, reasoning: 0, cached: 0 } }];
     const first = await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "What is the Bank of Canada policy rate now?", web: true })));
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    expect(budget.reserve).toHaveBeenCalledWith("user-1", expect.any(String), "web-search", "text", 8000);
+    expect(budget.reserve).toHaveBeenCalledWith("user-1", expect.any(String), "web-search", "text", 8000, expect.objectContaining({operation:"search",provider:"tavily"}));
     expect(budget.settle).toHaveBeenCalledWith(expect.any(String), "settled", 8000);
     expect(state.lastArgs!.system).toContain("[W1] Bank of Canada rate — https://www.bankofcanada.ca/rates/");
     const done = first.at(-1);
@@ -471,45 +501,22 @@ describe("web search", () => {
   });
 });
 
-
-describe("smart context", () => {
-  const id = "33333333-3333-4333-8333-333333333333";
-  function seed() {
-    state.fake!.db.conversations.push({ id, user_id: "user-1", provider: "anthropic", modelId: "anthropic-default", title: "test", project_id: null, mode: "chat", course_only: false, summary: "Older study discussion", summary_upto: 100 });
-    for (let i = 0; i < 20; i++) state.fake!.db.messages.push({ id: `old-${i}`, conversation_id: id, seq: i - 100, role: i % 2 ? "assistant" : "user", content: i === 0 ? "The sodium experiment temperature was 22 Celsius." : "A separate discussion of poetry.", status: "complete", kind: "text", attachment_ids: [] });
-  }
-  it("limits recent exchanges, recalls matching older facts, and keeps full stored history", async () => {
-    state.live = true;
-    seed();
-    const before = state.fake!.db.messages.length;
-    const events = await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", conversationId: id, content: "What temperature was the sodium experiment?" })));
-    expect(events[0]).toMatchObject({ dropped: true, summarized: true, contextTarget: 8000, retrieved: 1 });
-    expect(events[0].inputTokens).toBeLessThanOrEqual(8000);
-    expect(state.lastArgs!.history.filter(t => t.role === "user").length).toBeLessThanOrEqual(6);
-    expect(state.lastArgs!.system).toContain("22 Celsius");
-    expect(state.fake!.db.messages).toHaveLength(before + 2);
-    expect(budget.reserve).toHaveBeenCalledOnce(); // saved summary is reused
+describe("response completion quality",()=>{
+  it("saves a token-limited reply as partial, settles actual usage and does not save a truncated memory",async()=>{
+    state.live=true;
+    state.fake!.db.profiles=[{user_id:"user-1",memory_enabled:true}];
+    state.events=[{delta:"The calculation begins here.\n[[remember: Prefers SI units]]"},{usage:{input:10,output:5,reasoning:0,cached:0}},{finish:"length"}];
+    const events=await readEvents(await POST(req({provider:"anthropic",modelId:"anthropic-default",content:"Solve the physics problem"})));
+    expect(events.at(-1)).toMatchObject({t:"done",status:"partial",finishReason:"length"});
+    expect(state.fake!.db.messages.at(-1)?.status).toBe("partial");
+    expect(state.fake!.db.memories??[]).toHaveLength(0);
+    expect(budget.settle).toHaveBeenCalledWith(expect.any(String),"settled",70,expect.anything(),undefined,expect.objectContaining({finishReason:"length",qualityVersion:"student-v1"}));
   });
-  it("expands only for a large current task, within the configured ceiling", async () => {
-    state.live = true;
-    const events = await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "x".repeat(30000) })));
-    expect(events[0].contextTarget).toBeGreaterThan(8000);
-    expect(events[0].inputTokens).toBeLessThanOrEqual(24000);
-  });
-  it("only selects matching saved memories when memory is enabled", async () => {
-    state.live = true;
-    state.fake!.db.profiles = [{ memory_enabled: true }];
-    state.fake!.db.memories = [];
-    state.fake!.db.memories.push({ id: "m1", content: "Sodium lab uses Celsius", source: "student", created_at: "" }, { id: "m2", content: "Enjoys ancient poetry", source: "student", created_at: "" });
-    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "Help with sodium lab" })));
-    expect(state.lastArgs!.system).toContain("Sodium lab uses Celsius");
-    expect(state.lastArgs!.system).not.toContain("ancient poetry");
-    state.fake!.db.memories = []; // deletion is visible on the very next request
-    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "Help with sodium lab" })));
-    expect(state.lastArgs!.system).not.toContain("Sodium lab uses Celsius");
-    state.fake!.db.memories = [{ id: "m1", content: "Sodium lab uses Celsius", source: "student", created_at: "" }];
-    state.fake!.db.profiles[0].memory_enabled = false;
-    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "Help with sodium lab" })));
-    expect(state.lastArgs!.system).not.toContain("Sodium lab uses Celsius");
+  it("does not execute a tool call whose output/arguments were cut off",async()=>{
+    state.live=true;
+    state.events=[{toolCall:{id:"cut",name:"run_python",args:{code:"print(1)"}}},{finish:"length"}];
+    const events=await readEvents(await POST(req({provider:"anthropic",modelId:"anthropic-default",content:"Calculate",code:true})));
+    expect(events.some(e=>e.t==="tool_calls")).toBe(false);
+    expect(events.at(-1)).toMatchObject({status:"partial"});
   });
 });

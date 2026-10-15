@@ -48,8 +48,22 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done. Keep optional features of
 - Natan: tester count, survey destination, launch volume (Oct 10)
 - Team: Oct 17–19 coverage (Oct 16)
 
-## Smart context (Jake, Oct 15)
-- [x] Ordinary ~8k input target, bounded expansion, up to six recent exchanges, incremental summaries, selected older history and opted-in memories.
-- [x] Provider caching support and separate summary/cache-write cost accounting; lexical retrieval has zero embedding expense.
-- [x] Mock-provider checks for context limits, continuity, memory preference and cost calculations.
-- [ ] Run migration 0009 in the deployment database before deploying; confirm real-provider cache hit rates and expense totals with synthetic data.
+## Jake branch: smart memory / economics / analytics
+- [x] Audit existing context, adapters, budget ledger and reporting; write priorities/rollout in SMART_MEMORY_ANALYTICS.md
+- [x] Economic context targets, bounded memories, incremental summary checkpoints, explicit cross-provider model selection
+- [x] Cache-aware cost accounting and separate actual provider cost vs uncertain budget charges
+- [x] CAD trial allowance/FX/expiry records, privacy-safe event instrumentation and staff aggregates/dashboard
+- [x] Optional pgvector retrieval with opt-in, user isolation and deletion/purge behavior
+- [x] Mock adapter/route tests and actual local Postgres migration/RLS tests; synthetic cost benchmark
+- [ ] Noah/Jake: stage migrations, set FX/admin allowlist, validate live provider invoices and model availability
+- [ ] Jake/Natan: measure live synthetic recall, response accuracy, provider switching and phone UX before enabling retrieval
+- [ ] Second-model review before merging cost/context/auth changes; do not enable payments with this branch
+- [ ] Future payment integration: verified conversion/refund/cancellation receipts and atomic renewal/reset rules
+
+## Jake branch: response quality
+- [x] Shared student response contract with correction precedence, units, source boundaries and requested style
+- [x] Prioritize named/relevant source passages, preserve page identity and follow-up references
+- [x] Normalize completion reasons; disclose partial replies and prevent incomplete memory/tool/quiz updates
+- [x] Synthetic regression tests and 20-case live evaluation pack in benchmarks/response-quality-cases.json
+- [ ] Run blind, repeated live quality/cost/latency comparisons across all providers before claiming improved model accuracy
+- [ ] Stage phone/desktop completion and continuation UX; confirm detailed finish-state persistence needs

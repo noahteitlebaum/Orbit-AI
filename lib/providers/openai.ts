@@ -23,32 +23,42 @@ function toInput(t: ChatTurn): object[] {
 export const openai: ProviderAdapter = {
   id: "openai",
 
-  async *stream({ model, system, history, maxOutput, apiKey, signal, tools, cacheKey }) {
-    const res = await fetch("https://api.openai.com/v1/responses", {
+  async *stream({ model, system, history, maxOutput, apiKey, signal, tools, fast, cacheKey }) {
+    const call = (lowEffort: boolean, useCacheKey = true) => fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
       body: JSON.stringify({
+        ...(lowEffort ? { reasoning: { effort: "low" } } : {}),
         model: model.apiModel,
         instructions: system,
-        ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
         input: normalizeTurns(history).flatMap(toInput),
         ...(tools?.length ? { tools: tools.map((t) => ({ type: "function", ...toolSchema(t), strict: false })) } : {}),
         max_output_tokens: maxOutput,
         stream: true,
         store: false,
+        ...(cacheKey && useCacheKey ? { prompt_cache_key: cacheKey.slice(0, 64) } : {}),
       }),
       signal,
     });
+    let res = await call(Boolean(fast));
+    // A 400 can come from an optional setting this model doesn't accept: retry once with the plain request.
+    if (res.status === 400 && (fast || cacheKey)) res = await call(false, false);
     if (!res.ok || !res.body) throw errorForStatus(res.status);
 
+    let finished = false;
+    let refusal = false;
+    let hasCalls = false;
     for await (const { data } of readSse(res.body)) {
       if (data === "[DONE]") break;
       const ev = JSON.parse(data);
-      if (ev.type === "response.output_text.delta" && ev.delta) yield { delta: ev.delta as string };
+      if(ev.type === "response.refusal.delta") { refusal=true; if(ev.delta) yield {delta:ev.delta as string}; }
+      else if (ev.type === "response.output_text.delta" && ev.delta) yield { delta: ev.delta as string };
       else if (ev.type === "response.output_item.done" && ev.item?.type === "function_call") {
+        hasCalls=true;
         yield { toolCall: { id: String(ev.item.call_id), name: String(ev.item.name), args: parseArgs(ev.item.arguments) } };
       }
       else if (ev.type === "response.completed" || ev.type === "response.incomplete") {
+        finished=true;
         const u = ev.response?.usage;
         if (u) {
           yield {
@@ -57,21 +67,24 @@ export const openai: ProviderAdapter = {
               output: u.output_tokens ?? 0,
               reasoning: u.output_tokens_details?.reasoning_tokens ?? 0,
               cached: u.input_tokens_details?.cached_tokens ?? 0,
-              ...(u.input_tokens_details?.cache_write_tokens ? { cacheWrite: u.input_tokens_details.cache_write_tokens } : {}),
+              cacheWrite: u.input_tokens_details?.cache_write_tokens ?? 0,
             },
           };
         }
+        const why = ev.response?.incomplete_details?.reason;
+        yield { finish: ev.type === "response.incomplete" ? (why === "max_output_tokens" ? "length" : why === "content_filter" ? "blocked" : "unknown") : refusal ? "blocked" : hasCalls ? "tool_calls" : "stop" };
       } else if (ev.type === "response.failed" || ev.type === "error") {
         throw new ProviderError("unavailable", undefined, true);
       }
     }
+    if(!finished) throw new ProviderError("incomplete_stream",undefined,true);
   },
 
   async generateImage({ model, prompt, apiKey, signal }) {
     const res = await fetch("https://api.openai.com/v1/images/generations", {
       method: "POST",
       headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
-      body: JSON.stringify({ model: model.apiModel, prompt, n: 1, size: "1024x1024" }),
+      body: JSON.stringify({ model: model.apiModel, prompt, n: 1, size: "1024x1024", quality: "medium" }), // medium keeps the flat price honest
       signal,
     });
     if (!res.ok) throw errorForStatus(res.status);
