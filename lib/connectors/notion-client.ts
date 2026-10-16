@@ -1,4 +1,4 @@
-// Browser half of the Notion connector: sign-in pop-up and calls to /api/notion. The token stays in this tab.
+// Browser half of the Notion connector: sign-in pop-up and calls to /api/notion. The token stays in this browser.
 import type { NotionPage } from "./notion";
 import { ConnectorError } from "./types";
 
@@ -9,7 +9,7 @@ export const NOTION_CHANNEL = "orbit-notion-auth";
 
 export function notionSession(): { token: string; workspace: string } | null {
   try {
-    const v = sessionStorage.getItem(KEY);
+    const v = localStorage.getItem(KEY);
     return v ? (JSON.parse(v) as { token: string; workspace: string }) : null;
   } catch {
     return null;
@@ -17,8 +17,8 @@ export function notionSession(): { token: string; workspace: string } | null {
 }
 export function setNotionSession(v: { token: string; workspace: string } | null) {
   try {
-    if (v) sessionStorage.setItem(KEY, JSON.stringify(v));
-    else sessionStorage.removeItem(KEY);
+    if (v) localStorage.setItem(KEY, JSON.stringify(v));
+    else localStorage.removeItem(KEY);
   } catch {}
 }
 

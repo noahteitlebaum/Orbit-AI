@@ -1,8 +1,9 @@
 // Connectors bring things from apps students already use into Orbit (Jake's integration memo, Oct 12 2026).
 // Pattern for every connector: the student signs in with the app's own consent screen (OAuth, smallest read-only
 // permission), picks what they want, and it enters Orbit through the same path as a normal upload — so it is read,
-// searchable, cited and usable by all four AIs. Tokens stay in the browser's memory for that session only (never
-// stored on our server), so disconnecting is just closing the tab or revoking access in the app's account settings.
+// searchable, cited and usable by all four AIs. The same sign-ins power Plugins (lib/plugins), where the AI calls the
+// apps itself. Sign-ins stay in the student's browser (never stored on our server); Disconnect (Plugins → settings)
+// or revoking access in the app's account settings removes them.
 export type ConnectorId = "google-drive" | "onedrive";
 
 export type Connector = {

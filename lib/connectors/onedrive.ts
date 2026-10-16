@@ -21,7 +21,7 @@ function client(): Promise<Msal> {
   msal ??= import("@azure/msal-browser").then(({ createStandardPublicClientApplication }) =>
     createStandardPublicClientApplication({
       auth: { clientId: CLIENT_ID, authority: "https://login.microsoftonline.com/common", redirectUri: `${window.location.origin}/auth/microsoft` },
-      cache: { cacheLocation: "sessionStorage" }, // forgotten when the tab closes
+      cache: { cacheLocation: "localStorage" }, // stays signed in (like the apps) until the student disconnects
     }),
   );
   return msal;
@@ -44,6 +44,26 @@ export async function msToken(scopes: string[] = SCOPES, what = "OneDrive"): Pro
     if (/consent|admin/i.test(msg)) throw new ConnectorError(`Your school account needs an administrator to approve Orbit for ${what}. Try a personal Microsoft account, or upload/paste it instead.`);
     throw new ConnectorError("Microsoft sign-in was cancelled or blocked (allow pop-ups for Orbit).");
   }
+}
+
+/** A token without any pop-up (signed in before and consent already given), or null. */
+export async function msTokenSilent(scopes: string[]): Promise<string | null> {
+  if (!CLIENT_ID) return null;
+  const app = await client();
+  const account = app.getAllAccounts()[0];
+  if (!account) return null;
+  try {
+    return (await app.acquireTokenSilent({ scopes, account })).accessToken;
+  } catch {
+    return null;
+  }
+}
+
+/** Forget the Microsoft sign-in in this browser. */
+export async function msSignOut() {
+  if (!CLIENT_ID) return;
+  const app = await client();
+  for (const a of app.getAllAccounts()) await app.clearCache({ account: a }).catch(() => {});
 }
 
 const token = () => msToken();

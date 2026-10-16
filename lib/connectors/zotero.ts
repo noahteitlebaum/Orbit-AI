@@ -90,3 +90,11 @@ export async function readZotero(auth: ZoteroAuth, items: ZoteroItem[]): Promise
   ]);
   return bundleZotero(items.map((item, i) => ({ item, notes: (kids[i] as Raw[]).map((n) => htmlToText(n.data.note ?? "").trim()).filter(Boolean) })), bib as string);
 }
+
+/** Items by key (for the AI's zotero_read). */
+export async function zoteroItems(auth: ZoteroAuth, keys: string[]): Promise<ZoteroItem[]> {
+  const clean = keys.map((k) => k.trim()).filter((k) => /^[A-Z0-9]{8}$/.test(k)).slice(0, ZOTERO_LIMITS.pick);
+  if (!clean.length) return [];
+  const res = await zget(`/users/${auth.userId}/items?itemKey=${clean.join(",")}&format=json`, auth.key);
+  return ((await res.json()) as Raw[]).map((r) => ({ ...r.data, key: r.key, creators: r.data.creators ?? [] }));
+}

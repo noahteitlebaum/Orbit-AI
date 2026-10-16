@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { bundleRepo, fileText, isTextPath, loadRepo, parseRepoUrl, suggestFiles, type RepoInfo } from "./github";
-import { pollDevice } from "./github-device";
+import { exchangeCode, refreshToken } from "./github-oauth";
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -73,7 +73,7 @@ describe("GitHub API", () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 403, headers: { "x-ratelimit-reset": String(Math.floor(Date.now() / 1000) + 600) } })));
     await expect(loadRepo({ owner: "o", repo: "r" }, null)).rejects.toThrow(/hourly limit.*about 10 min/);
     vi.stubGlobal("fetch", vi.fn(async () => new Response("", { status: 404 })));
-    await expect(loadRepo({ owner: "o", repo: "r" }, null)).rejects.toThrow(/If it's private, sign in/);
+    await expect(loadRepo({ owner: "o", repo: "r" }, null)).rejects.toThrow(/If it's private, connect GitHub/);
   });
 
   it("reads private files through the API with the student's token", async () => {
@@ -87,16 +87,27 @@ describe("GitHub API", () => {
   });
 });
 
-describe("device sign-in relay", () => {
-  it("maps GitHub's answers", async () => {
+describe("web sign-in (server exchange)", () => {
+  it("swaps the code for a token with the client secret, and refreshes", async () => {
     vi.stubEnv("NEXT_PUBLIC_GITHUB_CLIENT_ID", "Iv1.abc");
-    const answers = [{ error: "authorization_pending" }, { error: "slow_down", interval: 10 }, { access_token: "ghu_x" }, { error: "access_denied" }];
-    const f = vi.fn(async () => Response.json(answers.shift()));
-    vi.stubGlobal("fetch", f);
-    expect(await pollDevice("dc")).toEqual({ wait: 0 });
-    expect(await pollDevice("dc")).toEqual({ wait: 10 });
-    expect(await pollDevice("dc")).toEqual({ token: "ghu_x" });
-    expect(await pollDevice("dc")).toEqual({ error: "Sign-in was cancelled on GitHub." });
-    expect(String((f.mock.calls[0] as unknown as [string, RequestInit])[1].body)).toContain("client_id=Iv1.abc");
+    vi.stubEnv("GITHUB_CLIENT_SECRET", "shh");
+    const bodies: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (_u: string, init: RequestInit) => {
+      bodies.push(String(init.body));
+      return Response.json(String(init.body).includes("refresh_token=") ? { access_token: "ghu_new", refresh_token: "ghr_2", expires_in: 28800 } : { access_token: "ghu_x", refresh_token: "ghr_1", expires_in: 28800 });
+    }));
+    const t = await exchangeCode("abc123", "https://orbit.app/auth/github");
+    expect(t).toMatchObject({ token: "ghu_x", refreshToken: "ghr_1" });
+    expect(t.expiresAt).toBeGreaterThan(Date.now());
+    expect(bodies[0]).toContain("client_secret=shh");
+    expect(bodies[0]).toContain("redirect_uri=https%3A%2F%2Forbit.app%2Fauth%2Fgithub");
+    expect((await refreshToken("ghr_1")).token).toBe("ghu_new");
+    expect(bodies[1]).toContain("grant_type=refresh_token");
+  });
+  it("reports GitHub's error", async () => {
+    vi.stubEnv("NEXT_PUBLIC_GITHUB_CLIENT_ID", "Iv1.abc");
+    vi.stubEnv("GITHUB_CLIENT_SECRET", "shh");
+    vi.stubGlobal("fetch", vi.fn(async () => Response.json({ error: "bad_verification_code" })));
+    await expect(exchangeCode("x1234", "https://o/auth/github")).rejects.toThrow("bad_verification_code");
   });
 });

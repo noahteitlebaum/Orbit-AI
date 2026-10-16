@@ -17,6 +17,9 @@ export type ConnectedApp = { id: string; name: string; hint: string; onPick: () 
 export function ToolsMenu(p: {
   onUpload: () => void;
   cloud?: ConnectedApp[]; // GitHub, Google Drive, OneDrive, mail, calendars, Notion, Zotero, YouTube
+  onManageApps?: () => void; // open the Plugins page
+  plugins?: { id: string; name: string; enabled: boolean }[]; // installed plugins the AI can use (switch per student)
+  onTogglePlugin?: (id: string, on: boolean) => void;
   imageLabel: string | null; // null = this app can't make images
   imageMode: boolean;
   onImageMode: (on: boolean) => void;
@@ -32,7 +35,7 @@ export function ToolsMenu(p: {
   disabled?: boolean;
 }) {
   const [open, setOpen] = useState(false);
-  const [view, setView] = useState<"main" | "apps">("main");
+  const [view, setView] = useState<"main" | "apps" | "plugins">("main");
   // Open upward when the box is low on the screen (in a chat), downward when it's high (empty chat), and never off-screen.
   const [place, setPlace] = useState<{ up: boolean; max: number }>({ up: true, max: 560 });
   function toggleOpen() {
@@ -86,12 +89,31 @@ export function ToolsMenu(p: {
 
       {open && (
         <div role="menu" style={{ maxHeight: place.max }} className={`model-menu absolute left-0 z-40 w-80 overflow-y-auto rounded-2xl ${place.up ? "bottom-full mb-2 origin-bottom-left" : "top-full mt-2 origin-top-left"} border border-line bg-composer p-1.5 shadow-menu`}>
-          {view === "apps" ? (
+          {view === "plugins" ? (
+            <>
+              <div className="flex items-center gap-1 px-1 pb-1">
+                <button type="button" onClick={() => setView("main")} aria-label="Back" className="grid h-8 w-8 place-items-center rounded-lg text-ink-muted hover:bg-surface-300">‹</button>
+                <p className="text-sm font-medium">Plugins</p>
+                {p.onManageApps && <button type="button" onClick={() => { p.onManageApps!(); setOpen(false); }} className="ml-auto rounded-full px-2.5 py-1 text-xs font-medium text-ink-muted hover:bg-surface-300 hover:text-ink">Browse</button>}
+              </div>
+              {(p.plugins ?? []).length === 0 && <p className="px-3 py-2 text-sm text-ink-subtle">No plugins installed yet.</p>}
+              {(p.plugins ?? []).map((pl) => (
+                <button key={pl.id} type="button" role="menuitemcheckbox" aria-checked={pl.enabled} className={item} onClick={() => p.onTogglePlugin?.(pl.id, !pl.enabled)}>
+                  <AppLogo id={pl.id} />
+                  <span className="min-w-0 flex-1 text-sm font-medium">{pl.name}</span>
+                  <Toggle on={pl.enabled} />
+                </button>
+              ))}
+              <p className="px-3 pb-1 pt-2 text-[11px] text-ink-subtle">The AI uses switched-on plugins when they help. Type @ to pick one for a message.</p>
+            </>
+          ) : view === "apps" ? (
             <>
               <div className="flex items-center gap-1 px-1 pb-1">
                 <button type="button" onClick={() => setView("main")} aria-label="Back" className="grid h-8 w-8 place-items-center rounded-lg text-ink-muted hover:bg-surface-300">‹</button>
                 <p className="text-sm font-medium">Add from apps</p>
-                <span className="ml-auto pr-2 text-[11px] text-ink-subtle">read-only</span>
+                {p.onManageApps ? (
+                  <button type="button" onClick={() => { p.onManageApps!(); setOpen(false); }} className="ml-auto rounded-full px-2.5 py-1 text-xs font-medium text-ink-muted hover:bg-surface-300 hover:text-ink">Manage</button>
+                ) : <span className="ml-auto pr-2 text-[11px] text-ink-subtle">read-only</span>}
               </div>
               {(["Files", "Mail & calendar", "Notes & research"] as const).map((g) => {
                 const apps = p.cloud!.filter((c) => c.group === g);
@@ -120,6 +142,16 @@ export function ToolsMenu(p: {
               <span className="block truncate text-xs text-ink-subtle">PDF, Word, PowerPoint, Excel, code, images…</span>
             </span>
           </button>
+          {p.plugins && (
+            <button type="button" role="menuitem" aria-haspopup="menu" className={item} onClick={() => setView("plugins")}>
+              <span className={icon}><PlugIcon /></span>
+              <span className="min-w-0 flex-1">
+                <span className="block text-sm font-medium">Plugins</span>
+                <span className="block truncate text-xs text-ink-subtle">{p.plugins.length ? `${p.plugins.filter((x) => x.enabled).length} of ${p.plugins.length} on · type @ to pick one` : "Let the AI use your apps"}</span>
+              </span>
+              <span aria-hidden className="text-ink-subtle">›</span>
+            </button>
+          )}
           {!!p.cloud?.length && (
             <button type="button" role="menuitem" aria-haspopup="menu" className={item} onClick={() => setView("apps")}>
               <span className={icon}><AppsIcon /></span>
@@ -249,6 +281,9 @@ function GlobeIcon() {
   );
 }
 
+function PlugIcon() {
+  return <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden><path d="M6 2v3M10 2v3M4.5 5h7v2.5a3.5 3.5 0 0 1-7 0zM8 11v3" fill="none" stroke="currentColor" strokeWidth="1.3" strokeLinecap="round" strokeLinejoin="round" /></svg>;
+}
 function AppsIcon() {
   return (
     <svg viewBox="0 0 16 16" width="15" height="15" aria-hidden>

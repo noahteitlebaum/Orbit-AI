@@ -28,6 +28,12 @@ import { OneDriveDialog } from "@/components/onedrive-dialog";
 import { GitHubDialog } from "@/components/github-dialog";
 import { MailDialog, type MailTarget } from "@/components/mail-dialog";
 import { SearchChats } from "@/components/search-chats";
+import { PluginsPage } from "@/components/plugins-page";
+import { isPluginTool, PLUGIN_BY_ID, pluginLinks, PLUGINS, pluginOfTool, type PluginId } from "@/lib/plugins/catalog";
+import { AppLogo } from "@/components/app-logos";
+import { pluginConfigured } from "@/lib/plugins/connect";
+import { runPluginTool } from "@/lib/plugins/run";
+import { activeSkills, useExtensions } from "@/lib/plugins/state";
 import { NotionDialog, YouTubeDialog, ZoteroDialog } from "@/components/connector-dialogs";
 import { notionSignInConfigured } from "@/lib/connectors/notion-client";
 import { googleConfigured, googleDriveConfigured, pickFromGoogleDrive } from "@/lib/connectors/google-drive";
@@ -35,7 +41,7 @@ import { oneDriveConfigured } from "@/lib/connectors/onedrive";
 import { ConnectorError } from "@/lib/connectors/types";
 import { extractCards, toFlashcardText } from "@/lib/export/flashcards";
 import { answerMarkdown, chatMarkdown, cleanAnswer, fileSlug, normalizeMath, markdownTables, saveFile, toCsv, toPlainText, type ExportMessage } from "@/lib/export/export";
-import { FolderActivity, previewFor, type Activity } from "@/components/folder-activity";
+import { FolderActivity, PluginSources, previewFor, type Activity } from "@/components/folder-activity";
 import { loadApprovalMode, loadFolder, permission, runFolderTool, saveApprovalMode, saveFolder, type ApprovalMode, type FolderLink } from "@/lib/folder/browser-fs";
 import { describeCall, isFolderTool, isWriteTool } from "@/lib/folder/tools";
 import { codeSupported, resultForModel, runPython, type RunFile, type RunResult } from "@/lib/code/runner";
@@ -152,6 +158,13 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
   const [firstName, setFirstName] = useState("");
   const [editing, setEditing] = useState<{ id: string; text: string } | null>(null);
   const [searchOpen, setSearchOpen] = useState(false);
+  const [page, setPage] = useState<"chat" | "plugins">("chat");
+  const [pluginsTab, setPluginsTab] = useState<"plugins" | "skills">("plugins");
+  const openPlugins = (tab: "plugins" | "skills" = "plugins") => { setPluginsTab(tab); setPage("plugins"); setSidebarOpen(false); };
+  const extensions = useExtensions();
+  // @-mentions: "@GitHub" in the message box makes the AI use that plugin for this message (like the apps).
+  const [mentions, setMentions] = useState<PluginId[]>([]);
+  const [mention, setMention] = useState<{ query: string; at: number; index: number } | null>(null);
   const [isMac, setIsMac] = useState(false);
   // Shortcuts the apps share: ⌘/Ctrl+K search chats, ⌘/Ctrl+Shift+O new chat.
   useEffect(() => {
@@ -326,7 +339,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       if (!res || handleAuth(res) || !res.ok) return;
       const out = (await res.json()) as { messages: Message[]; mode?: StudyMode; courseOnly?: boolean; summarized?: boolean; summaryIncomplete?: boolean; quiz?: QuizState | null };
       const withActivity = out.messages.map((m) =>
-        m.toolLog?.length ? { ...m, activity: m.toolLog.map((t, i) => ({ id: `${m.id}-${i}`, name: t.name, label: t.label, status: t.status, code: t.code, stdout: t.output })) } : m,
+        m.toolLog?.length ? { ...m, activity: m.toolLog.map((t, i) => ({ id: `${m.id}-${i}`, name: t.name, label: t.label, status: t.status, code: t.code, stdout: t.output, links: t.links })) } : m,
       );
       setMessages((prev) => (prev[id] ? prev : { ...prev, [id]: withActivity }));
       setSettings((prev) => (prev[id] ? prev : { ...prev, [id]: { mode: out.mode ?? "chat", courseOnly: Boolean(out.courseOnly), summarized: out.summarized, summaryIncomplete:out.summaryIncomplete, quiz: out.quiz } }));
@@ -400,6 +413,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
 
   newChatRef.current = () => newChat();
   function newChat() {
+    setPage("chat");
     setActive(null);
     setMessages((prev) => ({ ...prev, [`${DRAFT}:${provider}`]: [] }));
     setSettings((prev) => ({ ...prev, [`${DRAFT}:${provider}`]: { mode: "chat", courseOnly: false } }));
@@ -584,6 +598,8 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       const attachments = imageMode ? [] : ready.map((p) => ({ id: p.file!.id, name: p.file!.name, kind: p.file!.kind, status: p.file!.status, error: p.file!.error }));
       patchMessages(key, (m) => [...m, { id: tmpId(), role: "user", kind: "text", content, status: "complete", attachments }]);
       setInput("");
+      setMentions([]);
+      setMention(null);
       if (!imageMode) setPending([]);
     } else {
       // Drop the failed reply (or, for an edit, rewrite the question); the server does the same.
@@ -623,7 +639,13 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       if (f.status !== "failed" && DATA_FILE.test(f.name)) dataFiles.set(f.id, f.name);
     }
     const code = codeSupported();
-    const common = { provider: generationProvider, homeProvider: provider, modelId, mode: chatSettings.mode, courseOnly: chatSettings.courseOnly, web: Boolean(chatSettings.web), code, voice: opts.voice || undefined, folder: link ? { name: link.name } : undefined };
+    // Installed, switched-on plugins with tools (the AI decides when to use them) and installed skills.
+    // An @-mentioned plugin is used for this message even if it's switched off for chats.
+    const plugins = extensions.ext.plugins.filter((p) => (p.enabled || mentions.includes(p.id)) && PLUGIN_BY_ID.get(p.id)?.tools.length && pluginConfigured(PLUGIN_BY_ID.get(p.id)!)).map((p) => p.id);
+    const skills = activeSkills(extensions.ext);
+    const common = { provider: generationProvider, homeProvider: provider, modelId, mode: chatSettings.mode, courseOnly: chatSettings.courseOnly, web: Boolean(chatSettings.web), code, voice: opts.voice || undefined, folder: link ? { name: link.name } : undefined,
+      plugins: plugins.length ? plugins : undefined, skills: skills.length ? skills : undefined,
+      mentions: mentions.filter((m) => plugins.includes(m)).length ? mentions.filter((m) => plugins.includes(m)) : undefined };
     let body: object = { ...common, content, retry, ...(opts.edit ? { edit: true } : {}), attachmentIds, conversationId: convId, projectId: active ? undefined : filter };
     const steps: Step[] = [];
     const dataCache = new Map<string, RunFile>(); // data files downloaded once per reply
@@ -759,6 +781,36 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
         setAct({ status: r.ok ? "ok" : "error", stdout: [r.stdout, r.stderr].filter((x) => x.trim()).join("\n").trim(), detail: r.error ?? undefined, outputs: r.files });
         const note = missing.length ? `\n\nCouldn't load these data files: ${missing.join(", ")}.` : "";
         results.push({ id: c.id, name: c.name, output: resultForModel(r) + note, status: r.ok ? "ok" : "error" });
+        continue;
+      }
+      if (isPluginTool(c.name)) {
+        // Apps the student connected (Plugins page): run here with their own sign-in. If it isn't connected,
+        // show Connect in the chat and carry on once they've signed in (or tell the AI they chose not to).
+        setAct({ status: "running" });
+        let r = await runPluginTool(c.name, c.args);
+        if (!r.ok && r.connect) {
+          setAct({ status: "connect", connect: r.connect });
+          const connected = await new Promise<boolean>((resolve) => {
+            approvals.current.set(actId, resolve);
+            if (signal.aborted) resolve(false);
+            signal.addEventListener("abort", () => resolve(false), { once: true });
+          });
+          approvals.current.delete(actId);
+          if (!connected) {
+            setAct({ status: "declined", connect: undefined });
+            results.push({ id: c.id, name: c.name, output: `The student chose not to connect ${PLUGIN_BY_ID.get(pluginOfTool(c.name)!)?.name ?? "the app"} now. Don't call its tools again in this reply; answer without it or say what you'd need.`, status: "declined" });
+            continue;
+          }
+          setAct({ status: "running", connect: undefined });
+          r = await runPluginTool(c.name, c.args);
+        }
+        if (r.ok) {
+          setAct({ status: "ok", links: pluginLinks(c.name, r.output) });
+          results.push({ id: c.id, name: c.name, output: r.output, status: "ok" });
+        } else {
+          setAct({ status: "error", detail: r.error, connect: undefined });
+          results.push({ id: c.id, name: c.name, output: `Error: ${r.error}`, status: "error" });
+        }
         continue;
       }
       if (!isFolderTool(c.name) || !link) {
@@ -940,13 +992,71 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
   );
 
   const placeholder = imageMode ? "Describe an image" : empty ? `Ask ${theme.appName}` : `Reply to ${theme.appName}…`;
+  const installedTools = PLUGINS.filter((p) => p.tools.length && pluginConfigured(p) && extensions.ext.plugins.some((x) => x.id === p.id));
+  const mentionOptions = mention ? installedTools.filter((p) => !mentions.includes(p.id) && (p.name.toLowerCase().replace(/\s+/g, "").includes(mention.query.replace(/-/g, "")) || p.id.includes(mention.query))) : [];
+  function pickMention(id: PluginId) {
+    if (!mention) return;
+    // Remove the typed "@word" and keep the plugin as a chip.
+    const end = mention.at + 1 + mention.query.length;
+    setInput((prev) => (prev.slice(0, mention.at) + prev.slice(end)).replace(/\s{2,}/g, " "));
+    setMentions((prev) => (prev.includes(id) ? prev : [...prev, id]));
+    setMention(null);
+    requestAnimationFrame(() => document.querySelector<HTMLTextAreaElement>("textarea[data-composer]")?.focus());
+  }
+  const mentionMenu = mention && (
+    <div role="listbox" aria-label="Plugins" className="model-menu absolute bottom-full left-0 z-40 mb-2 w-72 rounded-2xl border border-line bg-composer p-1.5 shadow-menu">
+      <p className="px-3 pb-1 pt-1.5 text-xs font-medium text-ink-subtle">Use a plugin</p>
+      {mentionOptions.map((p, i) => (
+        <button key={p.id} type="button" role="option" aria-selected={i === mention.index} onMouseDown={(e) => { e.preventDefault(); pickMention(p.id); }}
+          className={`flex w-full items-center gap-3 rounded-xl px-3 py-2 text-left ${i === mention.index ? "bg-surface-300" : "hover:bg-surface-200"}`}>
+          <AppLogo id={p.id} size={24} framed />
+          <span className="min-w-0 flex-1"><span className="block text-sm font-medium">{p.name}</span><span className="block truncate text-xs text-ink-subtle">{p.tagline}</span></span>
+        </button>
+      ))}
+      {mentionOptions.length === 0 && (
+        <button type="button" onMouseDown={(e) => { e.preventDefault(); setMention(null); openPlugins("plugins"); }} className="block w-full rounded-xl px-3 py-2 text-left text-sm text-ink-muted hover:bg-surface-200">
+          {installedTools.length ? "No matching plugin." : "No plugins installed yet."} <span className="font-medium text-ink underline underline-offset-[3px]">Browse plugins</span>
+        </button>
+      )}
+    </div>
+  );
+  const mentionChips = mentions.length > 0 && (
+    <div className="mb-1.5 flex flex-wrap gap-1.5">
+      {mentions.map((id) => (
+        <button key={id} type="button" onClick={() => setMentions((prev) => prev.filter((x) => x !== id))} aria-label={`Stop using ${PLUGIN_BY_ID.get(id)?.name}`}
+          className="flex items-center gap-1.5 rounded-full bg-surface-300 py-1 pl-1.5 pr-2.5 text-xs font-medium text-ink">
+          <AppLogo id={id} size={16} /> {PLUGIN_BY_ID.get(id)?.name} <span aria-hidden className="text-ink-subtle">✕</span>
+        </button>
+      ))}
+    </div>
+  );
   const textarea = (
     <textarea
       data-composer
       value={input}
-      onChange={(e) => setInput(e.target.value)}
+      onChange={(e) => {
+        setInput(e.target.value);
+        const before = e.target.value.slice(0, e.target.selectionStart ?? e.target.value.length);
+        const m = /(^|\s)@([\w-]{0,30})$/.exec(before);
+        setMention(m ? { query: m[2].toLowerCase(), at: before.length - m[2].length - 1, index: 0 } : null);
+      }}
       onInput={(e) => { const t = e.currentTarget; t.style.height = "auto"; t.style.height = `${Math.min(t.scrollHeight, 160)}px`; }}
+      onBlur={() => setTimeout(() => setMention(null), 150)}
       onKeyDown={(e) => {
+        if (mention && mentionOptions.length) {
+          if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+            e.preventDefault();
+            const d = e.key === "ArrowDown" ? 1 : -1;
+            setMention({ ...mention, index: (mention.index + d + mentionOptions.length) % mentionOptions.length });
+            return;
+          }
+          if (e.key === "Enter" || e.key === "Tab") {
+            e.preventDefault();
+            pickMention(mentionOptions[mention.index].id);
+            return;
+          }
+        }
+        if (mention && e.key === "Escape") { setMention(null); return; }
         if (e.key === "Enter" && !e.shiftKey) {
           e.preventDefault();
           send(input);
@@ -962,6 +1072,9 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     <ToolsMenu
       onUpload={() => fileInput.current?.click()}
       cloud={cloudSources}
+      onManageApps={() => openPlugins("plugins")}
+      plugins={installedTools.map((pl) => ({ id: pl.id, name: pl.name, enabled: extensions.ext.plugins.find((x) => x.id === pl.id)?.enabled !== false }))}
+      onTogglePlugin={(id, on) => extensions.enablePlugin(id as PluginId, on)}
       imageLabel={imageModel?.label ?? null} imageMode={imageMode} onImageMode={setImageMode}
       mode={chatSettings.mode} onMode={(m) => setChatSettings({ mode: m })}
       courseOnly={chatSettings.courseOnly} onCourseOnly={(v) => setChatSettings({ courseOnly: v, ...(v ? { web: false } : {}) })}
@@ -1006,7 +1119,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
   const modelMenu = imageMode ? null : <ModelMenu provider={generationProvider} value={modelId} onChange={setModel} disabled={busy} />;
 
   const composer = (
-    <form onSubmit={(e) => { e.preventDefault(); send(input); }} className="w-full"
+    <form onSubmit={(e) => { e.preventDefault(); send(input); }} className="relative w-full"
       onDragOver={(e) => e.preventDefault()}
       onDrop={(e) => { e.preventDefault(); if (e.dataTransfer.files.length) attachFiles(Array.from(e.dataTransfer.files)); }}
       onPaste={(e) => { const imgs = Array.from(e.clipboardData.files); if (imgs.length) { e.preventDefault(); attachFiles(imgs); } }}>
@@ -1014,8 +1127,9 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       {lowBalance}
       {quizPanel}
       {theme.inlineComposer ? (
-        <div className={`mx-auto max-w-3xl py-2.5 pl-3 pr-3 transition ${theme.composerClass}`}>
-          {pendingChips && <div className="px-2 pt-1">{pendingChips}</div>}
+        <div className={`relative mx-auto max-w-3xl py-2.5 pl-3 pr-3 transition ${theme.composerClass}`}>
+          {mentionMenu}
+          {(pendingChips || mentionChips) && <div className="px-2 pt-1">{mentionChips}{pendingChips}</div>}
           <div className="flex items-center gap-1.5">
             {tools}
             {textarea}
@@ -1026,7 +1140,9 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
           </div>
         </div>
       ) : (
-        <div className={`mx-auto max-w-3xl p-2.5 pl-4 transition ${theme.composerClass}`}>
+        <div className={`relative mx-auto max-w-3xl p-2.5 pl-4 transition ${theme.composerClass}`}>
+          {mentionMenu}
+          {mentionChips}
           {pendingChips}
           {textarea}
           <div className="mt-1 flex items-center gap-1.5">
@@ -1100,6 +1216,11 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
             Search chats
             <kbd className="ml-auto hidden font-sans text-xs text-ink-subtle md:inline">{isMac ? "⌘K" : "Ctrl K"}</kbd>
           </button>
+          <button onClick={() => openPlugins("plugins")} aria-current={page === "plugins" ? "page" : undefined}
+            className={`flex w-full items-center gap-3 px-3 py-2.5 text-left text-[15px] transition ${page === "plugins" ? "bg-surface-300" : "hover:bg-surface-200"} ${theme.itemClass}`}>
+            <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden>{[[3, 3], [11, 3], [3, 11], [11, 11]].map(([x, y]) => <rect key={`${x}${y}`} x={x} y={y} width="6" height="6" rx="1.6" fill="none" stroke="currentColor" strokeWidth="1.5" />)}</svg>
+            Plugins
+          </button>
         </div>
 
         <div className="min-h-0 flex-1 overflow-y-auto px-3 pb-2">
@@ -1151,7 +1272,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                     onKeyDown={(e) => { if (e.key === "Enter") e.currentTarget.blur(); if (e.key === "Escape") setRenaming(null); }}
                     className="min-w-0 flex-1 rounded-lg bg-surface-000 px-3 py-2 text-[15px] outline-none ring-1 ring-brand" />
                 ) : (
-                  <button onClick={() => { setActive(c.id); setSidebarOpen(false); }} onDoubleClick={() => setRenaming(c.id)}
+                  <button onClick={() => { setActive(c.id); setPage("chat"); setSidebarOpen(false); }} onDoubleClick={() => setRenaming(c.id)}
                     aria-current={c.id === activeId ? "page" : undefined} className="min-w-0 flex-1 truncate px-3 py-2.5 text-left text-[15px]">
                     {c.title || "Untitled"}
                   </button>
@@ -1207,7 +1328,23 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       {sidebarOpen && <div className="fixed inset-0 z-20 bg-black/50 md:hidden" onClick={() => setSidebarOpen(false)} />}
 
       {/* Main */}
-      <main className="flex min-w-0 flex-1 flex-col">
+      <main className="relative flex min-w-0 flex-1 flex-col">
+        {page === "plugins" ? (
+          <>
+            <div className="flex items-center gap-1 px-4 pt-2.5 md:hidden">
+              <button onClick={() => setSidebarOpen(true)} className="rounded-md p-1 text-ink-muted hover:text-ink" aria-label="Open menu">
+                <svg viewBox="0 0 16 16" width="18" height="18" aria-hidden><path d="M2.5 4h11M2.5 8h11M2.5 12h11" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" /></svg>
+              </button>
+            </div>
+            {collapsed && (
+              <div className="absolute left-3 top-3 z-20 hidden items-center gap-1 md:flex">
+                <button onClick={() => toggleSidebar(false)} className="rounded-lg p-1.5 text-ink-muted hover:bg-surface-200 hover:text-ink" aria-label="Open sidebar" title="Open sidebar">{sidebarIcon}</button>
+              </div>
+            )}
+            <PluginsPage key={pluginsTab} ext={extensions} appName={theme.appName} initialTab={pluginsTab}
+              onTry={(prompt) => { newChat(); setInput(prompt); }} />
+          </>
+        ) : (<>
         <header className="flex min-h-14 items-center gap-2 px-4 py-2.5">
           {collapsed && (
             <div className="hidden items-center gap-1 md:flex">
@@ -1378,6 +1515,9 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                         {(m.kind === "image" || m.modelId?.endsWith("-image")) && (
                           <div className="mb-1.5 text-xs font-medium text-ink-subtle">{imageModel?.label ?? "Image"}</div>
                         )}
+                        {m.activity && m.activity.length > 0 && (
+                          <FolderActivity items={m.activity} onDecide={(id, ok) => approvals.current.get(id)?.(ok)} onRun={codeOk ? rerunPython : undefined} />
+                        )}
                         {m.kind === "image" ? (
                           m.status === "streaming" ? (
                             <div className="grid aspect-square w-full max-w-sm animate-pulse place-items-center rounded-2xl bg-surface-200 text-sm text-ink-subtle">Creating image…</div>
@@ -1398,12 +1538,10 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                         {m.kind==="text" && m.status==="partial" && m.finishReason==="length" && idx===thread.length-1 && (
                           <button onClick={()=>send("Continue your previous reply from where it stopped, without repeating the completed parts.")} disabled={busy} className="mt-2 text-sm font-medium text-ink-muted underline underline-offset-[3px]">Continue reply</button>
                         )}
-                        {m.activity && m.activity.length > 0 && (
-                          <FolderActivity items={m.activity} onDecide={(id, ok) => approvals.current.get(id)?.(ok)} onRun={codeOk ? rerunPython : undefined} />
-                        )}
                         {m.kind === "text" && m.sources && m.sources.length > 0 && (
                           <SourceList sources={m.sources} />
                         )}
+                        {m.activity && m.status !== "streaming" && <PluginSources items={m.activity} />}
                         {m.remembered && m.remembered.length > 0 && (
                           <p className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-subtle">
                             <span className="rounded-full bg-surface-200 px-2.5 py-1 font-medium text-ink-muted">Memory updated</span>
@@ -1462,6 +1600,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
           {theme.disclaimer}
           {usage && !usage.liveProviders?.includes(generationProvider) && <span className="text-ink-subtle"> Demo mode: {currentModel?.providerLabel} replies are fake until its API key is added.</span>}
         </p>
+        </>)}
       </main>
 
       <FolderDialog
@@ -1494,7 +1633,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
         />
       )}
       <SearchChats open={searchOpen} onClose={() => setSearchOpen(false)} appName={theme.appName} onNew={newChat}
-        chats={(appConvs ?? []).map((c) => ({ id: c.id, title: c.title, updatedAt: c.updatedAt }))} onOpen={(id) => setActive(id)} />
+        chats={(appConvs ?? []).map((c) => ({ id: c.id, title: c.title, updatedAt: c.updatedAt }))} onOpen={(id) => { setActive(id); setPage("chat"); }} />
       <MailDialog target={mailTarget} onClose={() => setMailTarget(null)} onPicked={(files) => void attachFiles(files)} />
       <NotionDialog open={appOpen === "notion"} onClose={() => setAppOpen(null)} onPicked={(files) => void attachFiles(files)} />
       <ZoteroDialog open={appOpen === "zotero"} onClose={() => setAppOpen(null)} onPicked={(files) => void attachFiles(files)} />

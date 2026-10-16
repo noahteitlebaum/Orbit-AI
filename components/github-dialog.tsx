@@ -2,12 +2,12 @@
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
-  bundleRepo, fileText, GITHUB_APP_SLUG, GITHUB_LIMITS, GitHubError, githubSignInConfigured, githubToken, isTextPath, loadRepo, myRepos,
-  parseRepoUrl, pollDeviceSignIn, setGithubToken, startDeviceSignIn, suggestFiles, type MyRepo, type RepoInfo,
+  bundleRepo, fileText, GITHUB_LIMITS, GitHubError, githubAuth, githubSignInConfigured, githubToken, isTextPath, loadRepo, myRepos,
+  parseRepoUrl, setGithubAuth, suggestFiles, type MyRepo, type RepoInfo,
 } from "@/lib/connectors/github";
+import { connectGitHub, githubInstallUrl } from "@/lib/connectors/github-connect";
 
 // Pick a GitHub repository and files to bring into the chat (one bundled, searchable file).
-type Device = { userCode: string; verificationUri: string };
 
 export function GitHubDialog({ open, onClose, onPicked }: { open: boolean; onClose: () => void; onPicked: (files: File[]) => void }) {
   const ref = useRef<HTMLDialogElement>(null);
@@ -15,13 +15,11 @@ export function GitHubDialog({ open, onClose, onPicked }: { open: boolean; onClo
   const [token, setToken] = useState<string | null>(null);
   const [repos, setRepos] = useState<MyRepo[] | null>(null);
   const [repoFilter, setRepoFilter] = useState("");
-  const [device, setDevice] = useState<Device | null>(null);
   const [info, setInfo] = useState<RepoInfo | null>(null);
   const [picked, setPicked] = useState<Set<string>>(new Set());
   const [fileFilter, setFileFilter] = useState("");
   const [status, setStatus] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const cancelPoll = useRef(false);
 
   useEffect(() => {
     const d = ref.current;
@@ -30,12 +28,10 @@ export function GitHubDialog({ open, onClose, onPicked }: { open: boolean; onClo
       d.showModal();
       setInfo(null);
       setStatus(null);
-      setDevice(null);
       const t = githubToken();
       setToken(t);
       if (t) myRepos(t).then(setRepos).catch(() => setRepos(null));
     } else if (!open && d.open) {
-      cancelPoll.current = true;
       d.close();
     }
   }, [open]);
@@ -60,35 +56,21 @@ export function GitHubDialog({ open, onClose, onPicked }: { open: boolean; onClo
 
   async function signIn() {
     setStatus(null);
-    cancelPoll.current = false;
+    setBusy(true);
     try {
-      const d = await startDeviceSignIn();
-      setDevice({ userCode: d.userCode, verificationUri: d.verificationUri });
-      let wait = d.interval;
-      const until = Date.now() + d.expiresIn * 1000;
-      while (!cancelPoll.current && Date.now() < until) {
-        await new Promise((r) => setTimeout(r, wait * 1000));
-        const out = await pollDeviceSignIn(d.deviceCode);
-        if (out.token) {
-          setGithubToken(out.token);
-          setToken(out.token);
-          setDevice(null);
-          setStatus("Signed in to GitHub.");
-          setRepos(await myRepos(out.token).catch(() => []));
-          return;
-        }
-        if (out.error) throw new GitHubError(out.error);
-        if (out.wait) wait = out.wait;
-      }
-      setDevice(null);
+      await connectGitHub();
+      const t = githubToken();
+      setToken(t);
+      setRepos(t ? await myRepos(t).catch(() => []) : null);
     } catch (e) {
-      setDevice(null);
       setStatus(e instanceof GitHubError ? e.message : "GitHub sign-in failed.");
+    } finally {
+      setBusy(false);
     }
   }
 
   function signOut() {
-    setGithubToken(null);
+    setGithubAuth(null);
     setToken(null);
     setRepos(null);
   }
@@ -158,14 +140,14 @@ export function GitHubDialog({ open, onClose, onPicked }: { open: boolean; onClo
                 {token ? (
                   <>
                     <div className="flex items-center gap-2">
-                      <p className="text-sm font-medium">Your repositories</p>
+                      <p className="text-sm font-medium">Your repositories{githubAuth()?.login ? ` · @${githubAuth()!.login}` : ""}</p>
                       <button type="button" onClick={signOut} className="ml-auto text-xs text-ink-subtle underline underline-offset-[3px] hover:text-ink">Sign out</button>
                     </div>
                     <input value={repoFilter} onChange={(e) => setRepoFilter(e.target.value)} placeholder="Filter" aria-label="Filter repositories"
                       className="mt-2 w-full rounded-xl border border-line bg-surface-000 px-3 py-1.5 text-sm outline-none focus:border-brand" />
                     <ul className="mt-2 max-h-56 overflow-y-auto">
                       {repos === null && <li className="py-2 text-sm text-ink-subtle">Loading…</li>}
-                      {repos?.length === 0 && <li className="py-2 text-sm text-ink-subtle">No repositories yet.{GITHUB_APP_SLUG ? " Install the Orbit app on the ones you want." : ""}</li>}
+                      {repos?.length === 0 && <li className="py-2 text-sm text-ink-subtle">Orbit can&apos;t see any repositories yet. Use “Choose repositories” below.</li>}
                       {repoList.map((r) => (
                         <li key={r.fullName}>
                           <button type="button" onClick={() => void load(r.fullName)} disabled={busy}
@@ -176,23 +158,16 @@ export function GitHubDialog({ open, onClose, onPicked }: { open: boolean; onClo
                         </li>
                       ))}
                     </ul>
-                    {GITHUB_APP_SLUG && (
-                      <a href={`https://github.com/apps/${GITHUB_APP_SLUG}/installations/new`} target="_blank" rel="noreferrer" className="mt-2 inline-block text-xs text-ink-subtle underline underline-offset-[3px] hover:text-ink">
-                        Give Orbit access to more repositories
+                    {githubInstallUrl() && (
+                      <a href={githubInstallUrl()} target="_blank" rel="noreferrer" className="mt-2 inline-block text-xs text-ink-subtle underline underline-offset-[3px] hover:text-ink">
+                        Choose repositories
                       </a>
                     )}
                   </>
-                ) : device ? (
-                  <div className="text-sm">
-                    <p>1. Open <a href={device.verificationUri} target="_blank" rel="noreferrer" className="font-medium underline underline-offset-[3px]">{device.verificationUri.replace(/^https:\/\//, "")}</a></p>
-                    <p className="mt-1.5 flex items-center gap-2">2. Enter <code className="rounded-lg bg-surface-200 px-2 py-1 font-mono text-base tracking-widest">{device.userCode}</code>
-                      <button type="button" onClick={() => navigator.clipboard?.writeText(device.userCode)} className="text-xs underline underline-offset-[3px]">Copy</button></p>
-                    <p className="mt-2 text-xs text-ink-subtle">Waiting for GitHub… this updates by itself.</p>
-                  </div>
                 ) : (
                   <div className="flex items-center gap-3">
-                    <p className="min-w-0 flex-1 text-sm text-ink-muted">Private repositories need you to sign in. Orbit can only read code (never change it).</p>
-                    <button type="button" onClick={signIn} className="shrink-0 rounded-full border border-line-strong px-4 py-2 text-sm font-medium hover:bg-surface-300">Sign in with GitHub</button>
+                    <p className="min-w-0 flex-1 text-sm text-ink-muted">Connect GitHub to see your own repositories, including private ones.</p>
+                    <button type="button" onClick={signIn} disabled={busy} className="shrink-0 rounded-full bg-brand px-4 py-2 text-sm font-medium text-on-brand disabled:opacity-50">{busy ? "Waiting…" : "Connect GitHub"}</button>
                   </div>
                 )}
               </div>

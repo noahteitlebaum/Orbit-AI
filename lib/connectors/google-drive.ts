@@ -34,7 +34,34 @@ export function driveDownload(doc: { id: string; name: string; mimeType: string 
 }
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
-const tokens = new Map<string, { value: string; expires: number }>();
+// Access tokens (1 hour) are kept in this browser so a reload doesn't ask again; Google gives browsers no refresh token,
+// so after an hour the student taps Connect once more.
+const TOKENS_KEY = "orbit.google.tokens";
+const tokens = new Map<string, { value: string; expires: number }>(
+  (() => {
+    try {
+      return Object.entries(JSON.parse(localStorage.getItem(TOKENS_KEY) ?? "{}") as Record<string, { value: string; expires: number }>);
+    } catch {
+      return [];
+    }
+  })(),
+);
+function saveTokens() {
+  try {
+    localStorage.setItem(TOKENS_KEY, JSON.stringify(Object.fromEntries([...tokens].filter(([, t]) => t.expires > Date.now()))));
+  } catch {}
+}
+/** A still-valid token for these scopes without any pop-up, or null. */
+export function googleTokenCached(scopes: string[]): string | null {
+  const t = tokens.get(scopes.join(" "));
+  return t && t.expires > Date.now() + 60_000 ? t.value : null;
+}
+export function googleSignOut() {
+  const g = (globalThis as { google?: { accounts?: { oauth2?: { revoke?: (t: string) => void } } } }).google;
+  for (const t of tokens.values()) g?.accounts?.oauth2?.revoke?.(t.value);
+  tokens.clear();
+  saveTokens();
+}
 
 /** A Google access token for these scopes (Google's own consent pop-up the first time). Kept in memory only. */
 export async function googleToken(scopes: string[]): Promise<string> {
@@ -51,6 +78,7 @@ export async function googleToken(scopes: string[]): Promise<string> {
         if (r.error || !r.access_token) return reject(new ConnectorError("Google sign-in was cancelled."));
         if (!scopes.every((s) => g.accounts.oauth2.hasGrantedAllScopes(r, s))) return reject(new ConnectorError("Orbit needs the permission you unticked to do this. Try again and allow it."));
         tokens.set(key, { value: r.access_token, expires: Date.now() + (Number(r.expires_in) || 3000) * 1000 });
+        saveTokens();
         resolve(r.access_token);
       },
       error_callback: () => reject(new ConnectorError("Google sign-in was cancelled or blocked (allow pop-ups for Orbit).")),

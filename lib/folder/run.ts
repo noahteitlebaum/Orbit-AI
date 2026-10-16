@@ -1,4 +1,5 @@
 import type { ChatTurn, ToolCall, ToolResult } from "@/lib/providers/types";
+import { isPluginTool, pluginLinks, type PluginLink } from "@/lib/plugins/catalog";
 import { describeCall, isKnownTool, MAX_CALLS_PER_STEP, MAX_RESULT_CHARS, MAX_RUN_TOOL_CHARS, MAX_TOOL_STEPS } from "./tools";
 
 // A "run" is one student message that the model answers in several rounds: it calls folder tools, the browser runs
@@ -9,7 +10,7 @@ export type ResultStatus = "ok" | "declined" | "error";
 export type StepResult = ToolResult & { status: ResultStatus };
 export type Step = { text: string; calls: ToolCall[]; results: StepResult[] };
 // code/output: for Python runs, so the code and what it printed are still there when the chat is reopened.
-export type ToolLogEntry = { name: string; label: string; status: ResultStatus; code?: string; output?: string };
+export type ToolLogEntry = { name: string; label: string; status: ResultStatus; code?: string; output?: string; links?: PluginLink[] };
 
 const MAX_TEXT = 50_000;
 const MAX_ARGS_CHARS = 100_000;
@@ -77,6 +78,7 @@ export function toolLog(steps: Step[]): ToolLogEntry[] {
     s.calls.map((c, i) => ({
       name: c.name, label: describeCall(c.name, c.args), status: s.results[i].status,
       ...(c.name === "run_python" ? { code: String(c.args.code ?? "").slice(0, 20_000), output: s.results[i].output.slice(0, 8_000) } : {}),
+      ...(isPluginTool(c.name) && s.results[i].status === "ok" ? (() => { const links = pluginLinks(c.name, s.results[i].output); return links.length ? { links } : {}; })() : {}),
     })),
   );
 }

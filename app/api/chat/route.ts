@@ -17,12 +17,16 @@ import { ADAPTERS, apiKeyFor, liveFor } from "@/lib/providers";
 import { ProviderError, type ChatTurn, type StreamEvent, type ToolCall, type Usage, type FinishReason } from "@/lib/providers/types";
 import { FOLDER_TOOLS, folderPrompt, MAX_CALLS_PER_STEP, MAX_TOOL_STEPS } from "@/lib/folder/tools";
 import { CODE_TOOLS, codePrompt } from "@/lib/code/tools";
+import { isPluginId, pluginPrompt, pluginTools, type PluginId } from "@/lib/plugins/catalog";
+import { skillsPrompt } from "@/lib/plugins/skills";
 import { loadPersonal, relevantMemories, parseRemember, personalPrompt, saveMemories, type Memory } from "@/lib/profile/personal";
 import { parseSteps, stepTurns, toolLog, type Step } from "@/lib/folder/run";
 
 // POST /api/chat — auth → ownership → gates → context (+ course material, images, summary) → reserve → stream → reconcile → save.
 // Body: { provider, modelId, content, conversationId?, projectId?, retry?, edit? (with retry: replace the last question), attachmentIds?, mode?, courseOnly?, folder?, run? }
 //   folder: { name } — the student connected a folder in the browser, so the model gets file tools.
+//   plugins: ["github", …] — installed, connected plugins (their tools run in the browser, like folder tools).
+//   skills: [{ name, description, instructions }] — the student's installed skills (Plugins → Skills).
 //   voice: true — voice conversation: short, speakable answers (the browser reads them aloud).
 //   code: true — the browser can run Python (lib/code/runner.ts), so the model gets run_python.
 //   run: { replyId, steps } — continue a reply after the browser ran the model's tool calls (see lib/folder/run.ts).
@@ -37,6 +41,7 @@ const VOICE_MAX_OUTPUT = 1_200; // spoken answers are short; a smaller cap also 
 type Body = {
   provider?: unknown; homeProvider?: unknown; modelId?: unknown; content?: unknown; conversationId?: unknown; projectId?: unknown; retry?: unknown;
   attachmentIds?: unknown; mode?: unknown; courseOnly?: unknown; folder?: unknown; run?: unknown; web?: unknown; code?: unknown; voice?: unknown;
+  plugins?: unknown; skills?: unknown; mentions?: unknown;
 };
 type Row = { id: string; seq: number; role: "user" | "assistant"; content: string; status: string; kind: string; attachment_ids: string[] | null; model_id: string | null };
 
@@ -267,11 +272,19 @@ export async function POST(request: Request): Promise<Response> {
   };
   const stepsUsed = run?.steps.length ?? 0;
   const codeOn = body.code === true;
-  const offered = [...(codeOn ? CODE_TOOLS : []), ...(folderName ? FOLDER_TOOLS : [])];
+  // Installed + connected plugins (Plugins page) and installed skills; the browser runs plugin tools with the student's sign-in.
+  const pluginIds = FOLDER_ACCESS[provider] && Array.isArray(body.plugins) ? [...new Set(body.plugins.filter(isPluginId))] : [];
+  const skillText = skillsPrompt(body.skills);
+  const offered = [...(codeOn ? CODE_TOOLS : []), ...(folderName ? FOLDER_TOOLS : []), ...pluginTools(pluginIds)];
   const tools = offered.length && stepsUsed < MAX_TOOL_STEPS && !voice ? offered : undefined;
   const runTurns = run ? stepTurns(run.steps) : [];
   const runTokens = runTurns.reduce((n, t) => n + estimateTokens(t.content + JSON.stringify(t.toolCalls ?? t.toolResults ?? "")), 0);
-  const folderText = [codeOn && tools ? codePrompt(material.dataFiles) : "", folderName && !voice ? folderPrompt(folderName, MAX_TOOL_STEPS - stepsUsed) : ""].filter(Boolean).join("\n\n");
+  const folderText = [
+    codeOn && tools ? codePrompt(material.dataFiles) : "",
+    folderName && !voice ? folderPrompt(folderName, MAX_TOOL_STEPS - stepsUsed) : "",
+    pluginIds.length && tools ? pluginPrompt(pluginIds, Array.isArray(body.mentions) ? body.mentions.filter((m): m is PluginId => isPluginId(m) && pluginIds.includes(m)) : []) : "",
+    skillText,
+  ].filter(Boolean).join("\n\n");
   const baseTokens = estimateTokens(systemPrompt(promptBase) + folderText) + imageCount * IMAGE_TOKENS + material.visualTokens + runTokens + (tools ? estimateTokens(JSON.stringify(tools)) + 400 : 0);
   const contextTarget = economicInputBudget(history, baseTokens + SUMMARY_TOKENS + CONTEXT.retrievalTokens,
     model.contextTokens - model.maxOutputTokens, Boolean(tools || largeMaterialTask && material.hasFiles || material.visualTokens));
