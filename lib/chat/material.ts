@@ -1,3 +1,4 @@
+import { CONTEXT } from "@/config/context";
 import { DATA_FILE } from "@/lib/code/tools";
 import type { SupabaseClient } from "@supabase/supabase-js";
 import { referenceLabel } from "@/lib/files/extract";
@@ -20,7 +21,7 @@ type FileRow = {
 };
 type ChunkRow = { file_id: string; page: number | null; chunk_index: number; content: string };
 
-export const MATERIAL_TOKEN_BUDGET = 12_000;
+export const MATERIAL_TOKEN_BUDGET = CONTEXT.materialTokens;
 const SMALL_FILE_CHARS = 24_000; // attachments this small are sent whole
 export const IMAGE_TOKENS = 1_600; // rough cost of one image in the prompt
 export const MAX_IMAGES = 4;
@@ -45,6 +46,8 @@ export async function gatherMaterial(
   supabase: SupabaseClient,
   opts: {
     conversationId: string; projectId: string | null; question: string; newAttachmentIds: string[]; pdfInput: boolean; imageSlots?: number;
+    tokenBudget?: number;
+    referencedAttachmentIds?: string[]; // most recently attached batch, for an explicit generic file reference
     previousQuestion?: string; // the student's message before this one, for follow-ups like "and the second one?"
   },
 ): Promise<Material> {
@@ -84,7 +87,11 @@ export async function gatherMaterial(
     const key = `${c.file_id}:${c.chunk_index}`;
     if (seen.has(key)) return true;
     const t = estimateTokens(c.content);
-    if (tokens + t > MATERIAL_TOKEN_BUDGET) return false;
+    if (tokens + t > (opts.tokenBudget ?? MATERIAL_TOKEN_BUDGET)) {
+      const note = "Only selected passages fit this request. Do not claim to have reviewed the entire file; ask for a specific section if more is needed.";
+      if (!notes.includes(note)) notes.push(note);
+      return false;
+    }
     seen.add(key);
     picked.push(c);
     tokens += t;
@@ -93,12 +100,19 @@ export async function gatherMaterial(
 
   // Rank evidence for THIS question before filling space with older attachments.
   const directNamed = namedFiles(opts.question, ready);
-  const followUp = /^(?:and\b|what about\b|why\b|how so\b|explain (?:that|this)\b|(?:the )?(?:first|second|third) (?:one|part)\b)/i.test(opts.question.trim());
+  const followUp = /^(?:and\b|what about\b|why\b|how so\b|go deeper\b|tell me more\b|explain more\b|explain (?:that|this)\b|(?:the )?(?:first|second|third) (?:one|part)\b)/i.test(opts.question.trim());
   const referenceQuestion = directNamed.length ? opts.question : followUp && opts.previousQuestion ? opts.previousQuestion : opts.question;
   const named = directNamed.length ? directNamed : followUp ? namedFiles(referenceQuestion,ready) : [];
   const explicitPages = mentionedPages(opts.question);
   const pages = explicitPages.length ? explicitPages : followUp ? mentionedPages(referenceQuestion) : [];
   const small = ready.filter(f=>f.conversation_id===opts.conversationId && (f.char_count??0)<=SMALL_FILE_CHARS);
+  const genericReference = /\b(?:this|that|the|attached|uploaded|previous)\s+(?:file|document|pdf|attachment|slides|reading)\b/i.test(opts.question)
+    || /^(?:(?:please|can you|could you)\s+)?(?:explain|summari[sz]e|describe|review|read|analy[sz]e)\s+(?:this|that|it)[.!?]*$/i.test(opts.question.trim());
+  const attachments = ready.filter(f => f.conversation_id === opts.conversationId);
+  const genericIds = new Set(genericReference
+    ? opts.referencedAttachmentIds ?? (attachments.length === 1 ? [attachments[0].id] : [])
+    : []);
+  const wholeSmall = small.filter(f => opts.newAttachmentIds.includes(f.id) || genericIds.has(f.id));
   const query = followUp && opts.previousQuestion ? `${opts.previousQuestion}\n${opts.question}` : opts.question;
 
   // 1. Explicit file/page references, including a follow-up to a scanned page with no searchable text.
@@ -144,8 +158,8 @@ export async function gatherMaterial(
   }
 
   // 5. A generic reference to a previously attached small file, only when no named/relevant passages were found.
-  if(!picked.length && !named.length) {
-    for(const f of small) {
+  if(genericReference && !picked.length && !named.length) {
+    for(const f of wholeSmall) {
       const {data:chunks}=await supabase.from("file_chunks").select("file_id, page, chunk_index, content").eq("file_id",f.id).order("chunk_index");
       for(const c of (chunks??[]) as ChunkRow[]) if(!take(c)) break;
     }
@@ -160,7 +174,7 @@ export async function gatherMaterial(
   const blocks = picked.map((c, i) => `[S${i + 1}] ${sources[i].label}\n${c.content}`);
 
   // Visual pages: scanned pages and pages with diagrams/pictures, from the files this question touches.
-  const wanted = pickVisualPages(ready, picked, small, {...opts, referencedFileIds:named.map(f=>f.id), requestedPages:pages});
+  const wanted = pickVisualPages(ready, picked, wholeSmall, {...opts, referencedFileIds:named.length ? named.map(f=>f.id) : [...genericIds], requestedPages:pages});
   const documents: TurnDocument[] = [];
   let visualTokens = 0;
   for (const { file, pages, skipped } of wanted) {
@@ -259,7 +273,8 @@ export function pickVisualPages(
     const visual = [...new Set(f.visual_pages ?? [])].sort((a, b) => a - b);
     if (!visual.length) continue;
     const isAttachment = f.conversation_id === opts.conversationId;
-    const whole = isAttachment && (small.includes(f) || f.status === "needs_ocr");
+    const whole = small.includes(f) || opts.referencedFileIds?.includes(f.id)
+      || (isAttachment && opts.newAttachmentIds.includes(f.id) && f.status === "needs_ocr");
     const explicitlyReferenced=opts.referencedFileIds?.includes(f.id);
     if (opts.referencedFileIds?.length && !explicitlyReferenced) continue;
     const relevant = explicitlyReferenced && opts.requestedPages?.length

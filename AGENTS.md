@@ -126,3 +126,8 @@ This version has breaking changes — APIs, conventions, and file structure may 
 This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
 
 <!-- END:nextjs-agent-rules -->
+
+## Jake merge-compatible fixes (Oct 15)
+Read `docs/JAKE_MERGE_FIXES.md`. Migration 0013 is required for atomic AI-memory consent. Video generation must pass
+full-input counting and the shared context ceiling. Preserve main's v2 billing/analytics migrations; do not restore the
+removed legacy 0009_smart_context.sql. Ordinary course material uses a smaller allowance; whole-file tasks expand explicitly.

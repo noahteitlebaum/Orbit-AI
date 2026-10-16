@@ -1,5 +1,5 @@
 import { readSse } from "./sse";
-import { decodeBase64, errorForStatus, normalizeTurns, parseArgs, ProviderError, toolSchema, type FinishReason, type ChatTurn, type ProviderAdapter } from "./types";
+import { decodeBase64, errorForStatus, normalizeTurns, parseArgs, ProviderError, toolSchema, type FinishReason, type ChatTurn, type ProviderAdapter, type StreamArgs } from "./types";
 
 // Gemini API (streamGenerateContent over SSE) + native image generation.
 const BASE = "https://generativelanguage.googleapis.com/v1beta/models";
@@ -34,19 +34,38 @@ function toContent(t: ChatTurn) {
   };
 }
 
+// Used unchanged by generation and counting, including system/tools/video resolution.
+function requestBody({ system, history, maxOutput, tools }: StreamArgs, lowThinking: boolean) {
+  return {
+    systemInstruction: { parts: [{ text: system }] },
+    contents: normalizeTurns(history).map(toContent),
+    ...(tools?.length ? { tools: [{ functionDeclarations: tools.map(toolSchema) }] } : {}),
+    generationConfig: { maxOutputTokens: maxOutput, ...(history.some(t => t.videos?.length) ? { mediaResolution: "MEDIA_RESOLUTION_LOW" } : {}), ...(lowThinking ? { thinkingConfig: { thinkingLevel: "low" } } : {}) },
+  };
+}
+
 export const google: ProviderAdapter = {
   id: "google",
 
-  async *stream({ model, system, history, maxOutput, apiKey, signal, tools, fast }) {
+  async countTokens(args) {
+    const res = await fetch(`${BASE}/${encodeURIComponent(args.model.apiModel)}:countTokens`, {
+      method: "POST",
+      headers: { "x-goog-api-key": args.apiKey, "Content-Type": "application/json" },
+      body: JSON.stringify({ generateContentRequest: { model: `models/${args.model.apiModel}`, ...requestBody(args, Boolean(args.fast)) } }),
+      signal: args.signal,
+    });
+    if (!res.ok) throw errorForStatus(res.status);
+    const { totalTokens } = await res.json();
+    if (!Number.isSafeInteger(totalTokens) || totalTokens <= 0) throw new ProviderError("unknown");
+    return totalTokens;
+  },
+
+  async *stream(args) {
+    const { model, apiKey, signal, fast } = args;
     const call = (lowThinking: boolean) => fetch(`${BASE}/${encodeURIComponent(model.apiModel)}:streamGenerateContent?alt=sse`, {
       method: "POST",
       headers: { "x-goog-api-key": apiKey, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        systemInstruction: { parts: [{ text: system }] },
-        contents: normalizeTurns(history).map(toContent),
-        ...(tools?.length ? { tools: [{ functionDeclarations: tools.map(toolSchema) }] } : {}),
-        generationConfig: { maxOutputTokens: maxOutput, ...(history.some((t) => t.videos?.length) ? { mediaResolution: "MEDIA_RESOLUTION_LOW" } : {}), ...(lowThinking ? { thinkingConfig: { thinkingLevel: "low" } } : {}) },
-      }),
+      body: JSON.stringify(requestBody(args, lowThinking)),
       signal,
     });
     let res = await call(Boolean(fast));

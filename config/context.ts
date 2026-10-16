@@ -6,6 +6,8 @@ export const CONTEXT = {
   recentExchanges: 5,
   summaryTokens: 1_500,
   retrievalTokens: 1_200,
+  materialTokens: 2_000,
+  largeTaskMaterialTokens: 12_000,
   summaryBatchChars: 16_000,
   summaryMaxPasses: 1,
 };

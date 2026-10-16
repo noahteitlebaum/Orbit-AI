@@ -87,6 +87,8 @@ function errorText(code: string, label: string, appName: string): string {
     case "trial_expired": return "Your free trial has ended. Contact the Orbit team for next steps.";
     case "fx_not_configured": return "Usage billing is not configured yet. Contact the Orbit team.";
     case "incomplete_stream": return "The connection ended before the model finished. Your partial reply is saved.";
+    case "video_too_large": return "This video is too large for the chat input limit. Use a shorter video or paste the relevant transcript excerpt.";
+    case "video_check_failed": return "Couldn’t check this video’s input size, so no video answer was started. Try again or paste a transcript excerpt.";
     case "context_too_large": return "This request is too large for the chat context limit. Try fewer files or split the question into smaller parts.";
     case "provider_disabled": return `${appName} is turned off by the team right now. Try another app on the left.`;
     case "no_image_model": return `${appName} can't make images.`;

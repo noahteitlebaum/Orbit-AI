@@ -38,3 +38,10 @@ describe("memory markers", () => {
     expect(hideRememberMarkers("a [[remember: x]] b")).toBe("a  b");
   });
 });
+
+
+it("leaves zero-match saved facts out of the request", async () => {
+  const { relevantMemories } = await import("./personal");
+  const memories = [{id:"m",content:"Enjoys medieval poetry",source:"student" as const,created_at:""}];
+  expect(relevantMemories(memories,"Calculate sodium chloride concentration")).toEqual([]);
+});

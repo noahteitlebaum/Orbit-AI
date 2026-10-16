@@ -51,3 +51,26 @@ describe('shared student response contract',()=>{
   expect(p).toContain('HINTS ONLY');expect(p).toContain('answer ONLY from these passages');
  });
 });
+
+
+describe("unrelated old attachments", () => {
+  it("does not send old text on an unrelated question", async () => {
+    const f=fakeSupabase({files:[file("old","Biology.txt",{mime:"text/plain"})],file_chunks:[{file_id:"old",page:1,chunk_index:0,content:"Photosynthesis enzyme ".repeat(800)}]});
+    const m=await gatherMaterial(f.client as unknown as SupabaseClient,{conversationId:CHAT,projectId:null,question:"Calculate 45 times 19",newAttachmentIds:[],pdfInput:false});
+    expect(m.sources).toEqual([]); expect(m.block).toBe("");
+  });
+  it("does not send old scanned pages on an unrelated question", () => {
+    const scan=file("old","Biology.pdf",{status:"needs_ocr",char_count:0,visual_pages:[1,2]}) as FileRow;
+    expect(pickVisualPages([scan],[],[],{conversationId:CHAT,newAttachmentIds:[]})).toEqual([]);
+  });
+  it("still sends newly attached scanned pages without searchable text", () => {
+    const scan=file("new","Biology.pdf",{status:"needs_ocr",char_count:0,visual_pages:[1,2]}) as FileRow;
+    expect(pickVisualPages([scan],[],[],{conversationId:CHAT,newAttachmentIds:["new"]})[0].pages).toEqual([1,2]);
+  });
+  it("resolves a generic reference to the most recently attached batch", async () => {
+    const f=fakeSupabase({files:[file("old","Old.txt",{mime:"text/plain"}),file("new","New.txt",{mime:"text/plain"})],file_chunks:[
+      {file_id:"old",page:1,chunk_index:0,content:"Old topic."},{file_id:"new",page:1,chunk_index:0,content:"Newest attachment."}]});
+    const m=await gatherMaterial(f.client as unknown as SupabaseClient,{conversationId:CHAT,projectId:null,question:"Summarize this",newAttachmentIds:[],referencedAttachmentIds:["new"],pdfInput:false});
+    expect(m.sources.map(s=>s.fileId)).toEqual(["new"]);
+  });
+});
