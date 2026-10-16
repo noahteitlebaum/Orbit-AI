@@ -2,7 +2,8 @@
 //  - Public repos: paste the link. No sign-in; the student's own browser calls GitHub (60 API calls/hour per
 //    student), and file contents come from raw.githubusercontent.com (doesn't count against that limit).
 //  - Private repos: "Sign in with GitHub" (device code, so no secret in the browser). Best set up as a GitHub App
-//    with read-only "Contents" + "Metadata" permissions; the token lives in this tab's session storage only.
+//    with read-only "Contents", "Metadata", "Issues" and "Pull requests" permissions; the token stays in this browser
+//    (local storage, like the apps' "connected" state) until the student disconnects.
 // The student picks files from the tree; they're bundled into one Markdown file (tree + files, with paths) that
 // goes through the normal upload, so it's searchable and citable like any other file.
 
@@ -91,32 +92,66 @@ export function bundleRepo(info: Pick<RepoInfo, "owner" | "repo" | "ref" | "comm
 }
 
 // ---------------------------------------------------------------- browser calls
-const TOKEN_KEY = "orbit.github.token";
-export function githubToken(): string | null {
+const TOKEN_KEY = "orbit.github.token"; // older builds: just the token
+const AUTH_KEY = "orbit.github.auth";
+export type GithubAuth = { token: string; refreshToken: string | null; expiresAt: number | null; login: string | null; avatar?: string | null };
+
+/** The student's GitHub sign-in in this browser (Plugins → GitHub → Connect), or null. */
+export function githubAuth(): GithubAuth | null {
   try {
-    return sessionStorage.getItem(TOKEN_KEY);
+    const v = localStorage.getItem(AUTH_KEY);
+    if (v) return JSON.parse(v) as GithubAuth;
+    const old = localStorage.getItem(TOKEN_KEY) ?? sessionStorage.getItem(TOKEN_KEY);
+    return old ? { token: old, refreshToken: null, expiresAt: null, login: null } : null;
   } catch {
     return null;
   }
 }
-export function setGithubToken(t: string | null) {
+export function setGithubAuth(a: GithubAuth | null) {
   try {
-    if (t) sessionStorage.setItem(TOKEN_KEY, t);
-    else sessionStorage.removeItem(TOKEN_KEY);
+    localStorage.removeItem(TOKEN_KEY);
+    sessionStorage.removeItem(TOKEN_KEY);
+    if (a) localStorage.setItem(AUTH_KEY, JSON.stringify(a));
+    else localStorage.removeItem(AUTH_KEY);
   } catch {}
+}
+export function githubToken(): string | null {
+  return githubAuth()?.token ?? null;
+}
+export function setGithubToken(t: string | null) {
+  setGithubAuth(t ? { token: t, refreshToken: null, expiresAt: null, login: null } : null);
+}
+
+/** Expiring GitHub App tokens (8 h) are renewed with the refresh token, through our server. */
+async function refreshGithub(): Promise<string | null> {
+  const a = githubAuth();
+  if (!a?.refreshToken) return null;
+  const res = await fetch("/api/github/oauth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "refresh", refreshToken: a.refreshToken }) }).catch(() => null);
+  const j = (await res?.json().catch(() => null)) as { token?: string; refreshToken?: string | null; expiresAt?: number | null } | null;
+  if (!res?.ok || !j?.token) return null;
+  setGithubAuth({ ...a, token: j.token, refreshToken: j.refreshToken ?? a.refreshToken, expiresAt: j.expiresAt ?? null });
+  return j.token;
 }
 
 export class GitHubError extends Error {}
 
-async function gh<T>(path: string, token: string | null): Promise<T> {
-  const res = await fetch(`https://api.github.com${path}`, {
-    headers: { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+export async function gh<T>(path: string, token: string | null): Promise<T> {
+  // A signed-in token that's about to expire is renewed first.
+  const a = token ? githubAuth() : null;
+  if (token && a?.token === token && a.expiresAt && a.expiresAt < Date.now() + 60_000) token = (await refreshGithub()) ?? token;
+  const call = (t: string | null) => fetch(`https://api.github.com${path}`, {
+    headers: { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", ...(t ? { Authorization: `Bearer ${t}` } : {}) },
   }).catch(() => null);
+  let res = await call(token);
+  if (res?.status === 401 && token) {
+    const fresh = await refreshGithub();
+    if (fresh) res = await call(fresh);
+  }
   if (!res) throw new GitHubError("Couldn't reach GitHub. Check your connection.");
-  if (res.status === 404) throw new GitHubError(token ? "Repository not found, or Orbit isn't allowed to read it (install the Orbit GitHub app on it)." : "Repository not found. If it's private, sign in with GitHub first.");
+  if (res.status === 404) throw new GitHubError(token ? "Repository not found, or Orbit hasn't been given access to it (Plugins → GitHub → Choose repositories)." : "Repository not found. If it's private, connect GitHub first.");
   if (res.status === 401) {
-    setGithubToken(null);
-    throw new GitHubError("Your GitHub sign-in expired. Sign in again.");
+    setGithubAuth(null);
+    throw new GitHubError("Your GitHub sign-in expired. Connect GitHub again.");
   }
   if (res.status === 403 || res.status === 429) {
     const reset = Number(res.headers.get("x-ratelimit-reset")) * 1000;
@@ -139,15 +174,16 @@ export async function loadRepo(ref: RepoRef, token = githubToken()): Promise<Rep
   };
 }
 
-/** One file's text at the loaded commit (raw host for public repos; the API for private ones). */
-export async function fileText(info: RepoInfo, path: string, token = githubToken()): Promise<string> {
+/** One file's text at the loaded commit, or the default branch when commit is "" (raw host for public repos; the API
+ *  when signed in, which also covers private ones). */
+export async function fileText(info: Pick<RepoInfo, "owner" | "repo" | "commit" | "private">, path: string, token = githubToken()): Promise<string> {
   const enc = path.split("/").map(encodeURIComponent).join("/");
   const res = info.private || token
-    ? await fetch(`https://api.github.com/repos/${info.owner}/${info.repo}/contents/${enc}?ref=${info.commit}`, {
+    ? await fetch(`https://api.github.com/repos/${info.owner}/${info.repo}/contents/${enc}${info.commit ? `?ref=${encodeURIComponent(info.commit)}` : ""}`, {
         headers: { Accept: "application/vnd.github.raw+json", "X-GitHub-Api-Version": "2022-11-28", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
       }).catch(() => null)
-    : await fetch(`https://raw.githubusercontent.com/${info.owner}/${info.repo}/${info.commit}/${enc}`).catch(() => null);
-  if (!res?.ok) throw new GitHubError(`Couldn't download ${path} from GitHub.`);
+    : await fetch(`https://raw.githubusercontent.com/${info.owner}/${info.repo}/${info.commit || "HEAD"}/${enc}`).catch(() => null);
+  if (!res?.ok) throw new GitHubError(res?.status === 404 ? `${path} wasn't found in ${info.owner}/${info.repo}.` : `Couldn't download ${path} from GitHub.`);
   const text = await res.text();
   if (/\u0000/.test(text.slice(0, 2000))) throw new GitHubError(`${path} isn't a text file.`);
   return text;
@@ -159,14 +195,48 @@ export async function myRepos(token: string): Promise<MyRepo[]> {
   return list.map((r) => ({ fullName: r.full_name, private: r.private, pushedAt: r.pushed_at, description: r.description }));
 }
 
-/** Device sign-in, through our server (GitHub's sign-in endpoints don't allow browser calls). */
-export async function startDeviceSignIn(): Promise<{ deviceCode: string; userCode: string; verificationUri: string; interval: number; expiresIn: number }> {
-  const res = await fetch("/api/github/device", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "start" }) }).catch(() => null);
-  if (!res?.ok) throw new GitHubError(res?.status === 503 ? "GitHub sign-in isn't set up yet." : "Couldn't start GitHub sign-in.");
-  return res.json();
+// ---------------------------------------------------------------- calls the AI makes (plugin tools, lib/plugins)
+export type RepoHit = { fullName: string; description: string | null; stars: number; language: string | null; private: boolean; updated: string };
+export async function searchRepos(q: string, token = githubToken()): Promise<RepoHit[]> {
+  const out = await gh<{ items: { full_name: string; description: string | null; stargazers_count: number; language: string | null; private: boolean; pushed_at: string }[] }>(
+    `/search/repositories?q=${encodeURIComponent(q)}&per_page=10`, token);
+  return out.items.map((r) => ({ fullName: r.full_name, description: r.description, stars: r.stargazers_count, language: r.language, private: r.private, updated: r.pushed_at }));
 }
-export async function pollDeviceSignIn(deviceCode: string): Promise<{ token?: string; wait?: number; error?: string }> {
-  const res = await fetch("/api/github/device", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "poll", deviceCode }) }).catch(() => null);
-  if (!res?.ok) return { error: "Couldn't reach GitHub." };
-  return res.json();
+
+/** Code search needs a signed-in user (GitHub's rule). Returns path + repo for each hit. */
+export async function searchCode(q: string, repo: string | undefined, token = githubToken()): Promise<{ repo: string; path: string }[]> {
+  if (!token) throw new GitHubError("Searching code needs GitHub sign-in. Connect GitHub in Plugins.");
+  const out = await gh<{ items: { path: string; repository: { full_name: string } }[] }>(
+    `/search/code?q=${encodeURIComponent(`${q}${repo ? ` repo:${repo}` : ""}`)}&per_page=20`, token);
+  return out.items.map((i) => ({ repo: i.repository.full_name, path: i.path }));
+}
+
+export type IssueSummary = { number: number; title: string; state: string; pr: boolean; author: string; comments: number; updated: string; labels: string[] };
+export async function listIssues(owner: string, repo: string, opts: { state?: "open" | "closed" | "all"; kind?: "issues" | "prs" | "all" } = {}, token = githubToken()): Promise<IssueSummary[]> {
+  const list = await gh<{ number: number; title: string; state: string; pull_request?: unknown; user?: { login: string }; comments: number; updated_at: string; labels: { name: string }[] }[]>(
+    `/repos/${owner}/${repo}/issues?state=${opts.state ?? "open"}&per_page=30&sort=updated`, token);
+  return list
+    .map((i) => ({ number: i.number, title: i.title, state: i.state, pr: Boolean(i.pull_request), author: i.user?.login ?? "", comments: i.comments, updated: i.updated_at, labels: i.labels.map((l) => l.name) }))
+    .filter((i) => opts.kind === "issues" ? !i.pr : opts.kind === "prs" ? i.pr : true);
+}
+
+/** An issue or pull request with its comments (and, for a PR, its changed files). Plain text for the model. */
+export async function readIssue(owner: string, repo: string, n: number, token = githubToken()): Promise<string> {
+  const i = await gh<{ number: number; title: string; state: string; body: string | null; user?: { login: string }; pull_request?: unknown; html_url: string; created_at: string }>(`/repos/${owner}/${repo}/issues/${n}`, token);
+  const comments = await gh<{ user?: { login: string }; body: string; created_at: string }[]>(`/repos/${owner}/${repo}/issues/${n}/comments?per_page=30`, token).catch(() => []);
+  const parts = [
+    `${i.pull_request ? "Pull request" : "Issue"} #${i.number}: ${i.title} (${i.state}) by ${i.user?.login ?? "?"} on ${i.created_at.slice(0, 10)}`,
+    i.html_url, "", (i.body ?? "").slice(0, 12_000) || "(no description)",
+  ];
+  if (i.pull_request) {
+    const files = await gh<{ filename: string; status: string; additions: number; deletions: number; patch?: string }[]>(`/repos/${owner}/${repo}/pulls/${n}/files?per_page=50`, token).catch(() => []);
+    if (files.length) parts.push("", "Changed files:", ...files.map((f) => `- ${f.filename} (${f.status}, +${f.additions}/-${f.deletions})${f.patch ? `\n\`\`\`diff\n${f.patch.slice(0, 3000)}\n\`\`\`` : ""}`));
+  }
+  if (comments.length) parts.push("", "Comments:", ...comments.map((c) => `- ${c.user?.login ?? "?"} (${c.created_at.slice(0, 10)}): ${c.body.slice(0, 2000)}`));
+  return parts.join("\n");
+}
+
+export async function recentCommits(owner: string, repo: string, token = githubToken()): Promise<string> {
+  const list = await gh<{ sha: string; commit: { message: string; author?: { name?: string; date?: string } } }[]>(`/repos/${owner}/${repo}/commits?per_page=15`, token);
+  return list.map((c) => `${c.sha.slice(0, 7)} ${c.commit.author?.date?.slice(0, 10) ?? ""} ${c.commit.author?.name ?? ""}: ${c.commit.message.split("\n")[0]}`).join("\n");
 }

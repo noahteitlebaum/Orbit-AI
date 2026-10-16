@@ -2,6 +2,8 @@
 // (implemented in lib/folder/browser-fs.ts). Used by the server (sent to the model) and the browser (labels, approval rules).
 // browser-fs.ts implements the same names; keep them in sync.
 
+import { describePluginCall, isPluginTool } from "@/lib/plugins/catalog";
+
 export type FolderToolName = "list_files" | "read_file" | "search_files" | "write_file" | "edit_file" | "make_folder" | "move_path" | "delete_path";
 
 export interface ToolDef {
@@ -71,8 +73,8 @@ export function isFolderTool(name: unknown): name is FolderToolName {
   return typeof name === "string" && BY_NAME.has(name as FolderToolName);
 }
 
-/** Any tool a model may call: folder tools or the Python sandbox. */
-export const isKnownTool = (name: unknown): boolean => isFolderTool(name) || name === "run_python";
+/** Any tool a model may call: folder tools, the Python sandbox, or a plugin (lib/plugins/catalog.ts). */
+export const isKnownTool = (name: unknown): boolean => isFolderTool(name) || name === "run_python" || isPluginTool(name);
 
 export function isWriteTool(name: string): boolean {
   return BY_NAME.get(name as FolderToolName)?.write ?? false;
@@ -91,7 +93,7 @@ export function describeCall(name: string, args: Record<string, unknown>): strin
     case "move_path": return `Move ${s("from")} → ${s("to")}`;
     case "delete_path": return `Delete ${s("path")}`;
     case "run_python": return "Ran Python";
-    default: return name;
+    default: return isPluginTool(name) ? describePluginCall(name, args) : name;
   }
 }
 

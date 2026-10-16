@@ -343,3 +343,8 @@ a.md-cite:hover { color: var(--ink); }
 
 .no-scrollbar { scrollbar-width: none; }
 .no-scrollbar::-webkit-scrollbar { display: none; }
+
+/* "Working with GitHub…" shimmer on tool steps in progress. */
+.orbit-shimmer { background: linear-gradient(90deg, var(--ink-muted) 0%, var(--ink) 50%, var(--ink-muted) 100%); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: orbit-shimmer 1.6s linear infinite; }
+@keyframes orbit-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
+@media (prefers-reduced-motion: reduce) { .orbit-shimmer { animation: none; color: var(--ink-muted); background: none; } }
