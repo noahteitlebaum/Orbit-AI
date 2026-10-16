@@ -29,6 +29,21 @@ async function reserve(id:string,bound:number=1000000){
  return (await db.query<{r:{ok:boolean;reason?:string}}>(`select public.reserve_budget_v2($1,$2,'openai-default','text',$3,$4::jsonb,'{}') as r`,[U,id,bound,JSON.stringify({provider:'openai',operation:'chat',conversationId:C})])).rows[0].r;
 }
 describe('financial SQL and RLS',()=>{
+ it('serializes Orbit turns and keeps lease RPCs inaccessible to students',async()=>{
+   const a='aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', b='bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
+   const claim=async(user:string,id:string)=>(await db.query<{ok:boolean}>(`select public.claim_orbit_turn($1,$2) as ok`,[user,id])).rows[0].ok;
+   expect(await claim(U,a)).toBe(true);expect(await claim(U,b)).toBe(false);
+   expect(await claim(V,b)).toBe(true);
+   await db.query(`select public.release_orbit_turn($1,$2)`,[U,b]);
+   expect(await claim(U,b)).toBe(false); // another turn cannot release the owner's lease
+   await db.query(`update public.orbit_turn_leases set expires_at=now()-interval '1 second' where user_id=$1`,[U]);
+   expect(await claim(U,b)).toBe(true);
+   await db.exec(`set role authenticated; select set_config('app.user_id','${U}',false);`);
+   expect((await db.query('select * from public.orbit_turn_leases')).rows).toHaveLength(0);
+   await expect(db.exec(`select public.claim_orbit_turn('${U}','${a}')`)).rejects.toThrow(/permission denied/);
+   await expect(db.exec(`select public.release_orbit_turn('${U}','${b}')`)).rejects.toThrow(/permission denied/);
+   await db.exec('reset role');
+ });
  it('requires configured FX and creates CAD-capped, time-limited trial once',async()=>{
    expect(await reserve('fx-missing')).toMatchObject({ok:false,reason:'fx_not_configured'});
    await db.exec(`insert into public.settings values('usd_cad_rate','1.25');`);

@@ -78,11 +78,12 @@ export async function POST(request: Request): Promise<Response> {
 
   // ---- conversation (RLS: only the user's own rows are visible or writable)
   let conversation: { id: string; title: string; provider: string; project_id: string | null; mode: string; course_only: boolean; summary: string | null; summary_upto: number | null };
-  const convCols = "id, title, provider, project_id, mode, course_only, summary, summary_upto";
+  const convCols = "id, title, provider, project_id, mode, course_only, summary, summary_upto, orbit_mode";
   if (isUuid(body.conversationId)) {
     const { data, error } = await supabase.from("conversations").select(convCols).eq("id", body.conversationId).maybeSingle();
     if (error) return dbError(error, "load_failed");
     if (!data) return json({ error: "not_found" }, 404);
+    if (data.orbit_mode) return json({ error: "bad_request" }, 400); // Orbit chats always use the voting endpoint.
     // Conversation owner/app is stable for the sidebar; generation provider may change explicitly.
     conversation = data;
   } else {

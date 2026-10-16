@@ -9,6 +9,7 @@ import { missedConcepts, type QuizState } from "@/lib/chat/quiz";
 import { answersLeft, answersText, isLow, timesCheaper, typicalAnswerMicros } from "@/lib/billing/estimate";
 import { signOut } from "../login/actions";
 import { ProviderLogo } from "@/components/provider-logo";
+import { OrbitChat } from "@/components/orbit-chat";
 import { ModelMenu } from "@/components/model-menu";
 import { ToolsMenu, type ConnectedApp, type StudyMode } from "@/components/tools-menu";
 import { ProjectDialog } from "@/components/project-dialog";
@@ -109,6 +110,7 @@ const STARTERS: { label: string; icon: string; text: string; mode?: StudyMode; u
 export function ChatApp({ email, userId }: { email: string; userId: string }) {
   const router = useRouter();
   const [provider, setProvider] = useState<ProviderId>("openai");
+  const [orbitMode, setOrbitMode] = useState(false);
   const [convs, setConvs] = useState<Record<ProviderId, ConvSummary[] | null>>(() => perProvider<ConvSummary[] | null>(() => null));
   const [projects, setProjects] = useState<Record<ProviderId, Project[]>>(() => perProvider<Project[]>(() => []));
   const [activeIds, setActiveIds] = useState<Record<ProviderId, string | null>>(() => perProvider<string | null>(() => null));
@@ -267,12 +269,15 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
 
   useEffect(() => {
     let saved: ProviderId = "openai";
+    let savedOrbit = false;
     try {
-      const v = localStorage.getItem(APP_KEY) as ProviderId | null;
-      if (v && PROVIDERS.includes(v)) saved = v;
+      const v = localStorage.getItem(APP_KEY);
+      if (v === "orbit") savedOrbit = true;
+      else if (v && PROVIDERS.includes(v as ProviderId)) saved = v as ProviderId;
     } catch {}
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setProvider(saved);
+    setOrbitMode(savedOrbit);
     setReady(true);
     loadUsage();
     setApprovalMode(loadApprovalMode());
@@ -288,7 +293,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     // Wait until the saved choice is restored, or we'd overwrite it (React runs effects twice in dev).
     if (!ready) return;
     try {
-      localStorage.setItem(APP_KEY, provider);
+      localStorage.setItem(APP_KEY, orbitMode ? "orbit" : provider);
     } catch {}
     if (convs[provider] !== null) return;
     (async () => {
@@ -310,7 +315,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       setProjects((prev) => ({ ...prev, [provider]: projs }));
       setActiveIds((prev) => (prev[provider] ? prev : { ...prev, [provider]: list[0]?.id ?? null }));
     })();
-  }, [ready, provider, convs, handleAuth]);
+  }, [ready, provider, orbitMode, convs, handleAuth]);
 
   // Load an opened chat's messages once.
   useEffect(() => {
@@ -1043,11 +1048,17 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
   const remaining = usage?.live ? usage.allowance - usage.spent - usage.reserved : 0;
   const usedPct = usage?.live && usage.allowance > 0 ? Math.min(100, ((usage.spent + usage.reserved) / usage.allowance) * 100) : 0;
 
+  if (orbitMode) return <OrbitChat onSelectProvider={(p) => { setOrbitMode(false); pickProvider(p); }} />;
+
   return (
     <div data-theme={provider} className="flex h-dvh bg-surface-000 font-ui text-ink">
       {/* App rail */}
       <nav aria-label="AI apps" className="hidden w-[76px] shrink-0 flex-col items-center gap-3 border-r border-line bg-surface-100 py-4 md:flex">
         <Image src="/brand/orbit-mark.png" alt="Orbit AI" width={32} height={32} className="logo-mono mb-3 h-8 w-8 object-contain" />
+        <button onClick={() => setOrbitMode(true)} disabled={busy} title="Orbit mode" className="flex flex-col items-center gap-1 disabled:opacity-50">
+          <span className="grid h-11 w-11 place-items-center rounded-2xl border border-line text-2xl text-brand hover:bg-surface-200">◎</span>
+          <span className="text-[11px] text-ink-muted">Orbit</span>
+        </button>
         {PROVIDERS.map((p) => {
           const on = p === provider;
           return (
@@ -1234,6 +1245,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
             </div>
           )}
           <div className={`flex gap-1 md:hidden ${(active && projects[provider].length > 0) || exportable.some((m) => m.role === "assistant") ? "" : "ml-auto"}`} role="group" aria-label="AI apps">
+            <button onClick={() => setOrbitMode(true)} disabled={busy} aria-label="Orbit mode" className="grid h-9 w-9 place-items-center rounded-xl text-xl text-brand">◎</button>
             {PROVIDERS.map((p) => (
               <button key={p} onClick={() => pickProvider(p)} disabled={busy && p !== provider} aria-pressed={p === provider} aria-label={THEMES[p].appName}
                 className={`grid h-9 w-9 place-items-center rounded-xl ${p === provider ? "bg-surface-300" : ""}`}>
