@@ -6,12 +6,13 @@ export async function GET(request: Request) {
   const auth = await requireAppUser();
   if ("error" in auth) return auth.error;
   const provider = new URL(request.url).searchParams.get("provider");
-  if (!isProvider(provider)) return json({ error: "bad_request" }, 400);
+  if (!isProvider(provider) && provider !== "orbit") return json({ error: "bad_request" }, 400);
 
   const { data, error } = await auth.supabase
     .from("conversations")
     .select("id, title, model_id, project_id, updated_at")
-    .eq("provider", provider)
+    .eq("provider", provider === "orbit" ? "openai" : provider)
+    .eq("orbit_mode", provider === "orbit")
     .order("updated_at", { ascending: false })
     .limit(200);
   if (error) return dbError(error, "load_failed");

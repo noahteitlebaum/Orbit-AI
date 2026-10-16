@@ -75,3 +75,12 @@ Status: `[ ]` todo · `[~]` in progress · `[x]` done. Keep optional features of
 - [x] Gate unmatched attachment/scanned-page fallbacks and omit zero-match saved facts.
 - [ ] Apply 0013 to staging before deployment; validate a synthetic video and live preference changes.
 See JAKE_MERGE_FIXES.md for migration-order caveats and validation limits.
+
+## Orbit mode (Jake, October 15)
+- [x] Separate Orbit interface and saved text conversations; four independent no-self ballots.
+- [x] Plurality routing with disclosed deterministic ties; three-vote collaboration gate, at most one specialist.
+- [x] Per-phase budget ledger, provider gates, in-flight lease, bounded context, explicit partial/failure states.
+- [ ] Apply 0014 on staging; verify all four configured models with synthetic live calls before enabling.
+- [ ] Blind quality/cost/latency comparison against individual models before claiming superiority.
+- [ ] Future scope: files, tools, voice, semantic retrieval and full historical browsing in Orbit.
+See ORBIT_MODE.md for contract, limitations and rollout.

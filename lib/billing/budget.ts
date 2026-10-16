@@ -10,7 +10,7 @@ export type ReserveResult =
   | { ok: false; reason: "budget" | "global_stop" | "duplicate" | "trial_expired" | "fx_not_configured" | "error"; remaining?: number };
 
 export type CallMetadata = {
-  conversationId?: string; provider?: ProviderId | "tavily" | "elevenlabs"; operation?: "chat" | "summary" | "embedding" | "search" | "image" | "transcription" | "speech";
+  conversationId?: string; provider?: ProviderId | "tavily" | "elevenlabs"; operation?: "chat" | "summary" | "embedding" | "search" | "image" | "transcription" | "speech" | "orbit_vote" | "orbit_specialist" | "orbit_answer";
   inputEstimate?: number; contextTarget?: number; historyDropped?: boolean; retrievedCount?: number; latencyMs?: number; finishReason?: string; qualityVersion?: string; unitCostUsdMicros?: number;
 };
 export async function reserve(userId: string, requestId: string, modelId: string, kind: "text" | "image", boundMicros: number, metadata: CallMetadata = {}): Promise<ReserveResult> {

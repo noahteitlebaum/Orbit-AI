@@ -131,3 +131,10 @@ This block is written and re-added by `next dev` — verify at `node_modules/nex
 Read `docs/JAKE_MERGE_FIXES.md`. Migration 0013 is required for atomic AI-memory consent. Video generation must pass
 full-input counting and the shared context ceiling. Preserve main's v2 billing/analytics migrations; do not restore the
 removed legacy 0009_smart_context.sql. Ordinary course material uses a smaller allowance; whole-file tasks expand explicitly.
+
+## Orbit mode preview (Jake, October 15)
+Jake explicitly authorized smart routing and bounded collaboration, superseding the older launch exclusion for this feature.
+Read `docs/ORBIT_MODE.md`. Orbit is a separate conversation mode, not a provider. Four independent ballots must succeed;
+self-votes are server-rejected. Three collaboration requests allow one specialist, then one lead. All paid phases reserve
+and settle separately; no silent degraded panel or provider substitution. Text-only preview; feature flag
+`ORBIT_MODE_ENABLED=on` and migration 0014 are required. Do not claim optimal routing or improved accuracy without evaluation.
