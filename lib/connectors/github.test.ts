@@ -111,3 +111,30 @@ describe("web sign-in (server exchange)", () => {
     await expect(exchangeCode("x1234", "https://o/auth/github")).rejects.toThrow("bad_verification_code");
   });
 });
+
+describe("GitHub sign-in renewal", () => {
+  it("renews an expired token once, even when several calls need it at the same time", async () => {
+    vi.resetModules();
+    const store = new Map<string, string>();
+    const mem = { getItem: (k: string) => store.get(k) ?? null, setItem: (k: string, v: string) => void store.set(k, v), removeItem: (k: string) => void store.delete(k) };
+    vi.stubGlobal("localStorage", mem);
+    vi.stubGlobal("sessionStorage", mem);
+    const gh = await import("./github");
+    gh.setGithubAuth({ token: "ghu_old", refreshToken: "ghr_1", expiresAt: Date.now() - 1000, login: "noah", avatar: "" });
+    let refreshes = 0;
+    const auths: string[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit = {}) => {
+      if (url === "/api/github/oauth") {
+        refreshes++;
+        await new Promise((r) => setTimeout(r, 20));
+        return Response.json({ token: "ghu_new", refreshToken: "ghr_2", expiresAt: Date.now() + 8 * 3600_000 });
+      }
+      auths.push((init.headers as Record<string, string>).Authorization);
+      return Response.json([]);
+    }));
+    await Promise.all([gh.myRepos("ghu_old"), gh.myRepos("ghu_old"), gh.myRepos("ghu_old")]);
+    expect(refreshes).toBe(1);
+    expect(auths).toEqual(["Bearer ghu_new", "Bearer ghu_new", "Bearer ghu_new"]);
+    expect(gh.githubAuth()).toMatchObject({ token: "ghu_new", refreshToken: "ghr_2", login: "noah" });
+  });
+});

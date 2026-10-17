@@ -122,15 +122,26 @@ export function setGithubToken(t: string | null) {
   setGithubAuth(t ? { token: t, refreshToken: null, expiresAt: null, login: null } : null);
 }
 
-/** Expiring GitHub App tokens (8 h) are renewed with the refresh token, through our server. */
-async function refreshGithub(): Promise<string | null> {
-  const a = githubAuth();
-  if (!a?.refreshToken) return null;
-  const res = await fetch("/api/github/oauth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "refresh", refreshToken: a.refreshToken }) }).catch(() => null);
-  const j = (await res?.json().catch(() => null)) as { token?: string; refreshToken?: string | null; expiresAt?: number | null } | null;
-  if (!res?.ok || !j?.token) return null;
-  setGithubAuth({ ...a, token: j.token, refreshToken: j.refreshToken ?? a.refreshToken, expiresAt: j.expiresAt ?? null });
-  return j.token;
+/** Expiring GitHub App tokens (8 h) are renewed with the refresh token, through our server. GitHub replaces the refresh
+ *  token on every renewal, so only one renewal runs at a time, and a renewal another tab already did is reused. */
+let refreshing: Promise<string | null> | null = null;
+function refreshGithub(staleToken: string | null): Promise<string | null> {
+  refreshing ??= (async () => {
+    const a = githubAuth();
+    if (!a) return null;
+    if (staleToken && a.token !== staleToken && (!a.expiresAt || a.expiresAt > Date.now() + 60_000)) return a.token; // already renewed
+    if (!a.refreshToken) return null;
+    const res = await fetch("/api/github/oauth", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "refresh", refreshToken: a.refreshToken }) }).catch(() => null);
+    const j = (await res?.json().catch(() => null)) as { token?: string; refreshToken?: string | null; expiresAt?: number | null } | null;
+    if (!res?.ok || !j?.token) {
+      // Another tab may have renewed it meanwhile (its refresh token replaced ours).
+      const now = githubAuth();
+      return now && now.token !== a.token ? now.token : null;
+    }
+    setGithubAuth({ ...a, token: j.token, refreshToken: j.refreshToken ?? a.refreshToken, expiresAt: j.expiresAt ?? null });
+    return j.token;
+  })().finally(() => { refreshing = null; });
+  return refreshing;
 }
 
 export class GitHubError extends Error {}
@@ -138,19 +149,20 @@ export class GitHubError extends Error {}
 export async function gh<T>(path: string, token: string | null): Promise<T> {
   // A signed-in token that's about to expire is renewed first.
   const a = token ? githubAuth() : null;
-  if (token && a?.token === token && a.expiresAt && a.expiresAt < Date.now() + 60_000) token = (await refreshGithub()) ?? token;
+  if (token && a?.token === token && a.expiresAt && a.expiresAt < Date.now() + 60_000) token = (await refreshGithub(token)) ?? token;
   const call = (t: string | null) => fetch(`https://api.github.com${path}`, {
     headers: { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", ...(t ? { Authorization: `Bearer ${t}` } : {}) },
   }).catch(() => null);
   let res = await call(token);
   if (res?.status === 401 && token) {
-    const fresh = await refreshGithub();
+    const fresh = await refreshGithub(token);
     if (fresh) res = await call(fresh);
   }
   if (!res) throw new GitHubError("Couldn't reach GitHub. Check your connection.");
   if (res.status === 404) throw new GitHubError(token ? "Repository not found, or Orbit hasn't been given access to it (Plugins → GitHub → Choose repositories)." : "Repository not found. If it's private, connect GitHub first.");
   if (res.status === 401) {
-    setGithubAuth(null);
+    // Only forget the sign-in if it's still the one that failed (not one another tab just renewed).
+    if (githubAuth()?.token === token || !githubAuth()?.refreshToken) setGithubAuth(null);
     throw new GitHubError("Your GitHub sign-in expired. Connect GitHub again.");
   }
   if (res.status === 403 || res.status === 429) {
