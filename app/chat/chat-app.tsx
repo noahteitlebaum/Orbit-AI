@@ -9,7 +9,6 @@ import { missedConcepts, type QuizState } from "@/lib/chat/quiz";
 import { answersLeft, answersText, isLow, timesCheaper, typicalAnswerMicros } from "@/lib/billing/estimate";
 import { signOut } from "../login/actions";
 import { ProviderLogo } from "@/components/provider-logo";
-import { OrbitChat } from "@/components/orbit-chat";
 import { ModelMenu } from "@/components/model-menu";
 import { ToolsMenu, type ConnectedApp, type StudyMode } from "@/components/tools-menu";
 import { ProjectDialog } from "@/components/project-dialog";
@@ -29,7 +28,7 @@ import { GitHubDialog } from "@/components/github-dialog";
 import { MailDialog, type MailTarget } from "@/components/mail-dialog";
 import { SearchChats } from "@/components/search-chats";
 import { PluginsPage } from "@/components/plugins-page";
-import { isPluginTool, PLUGIN_BY_ID, pluginLinks, PLUGINS, pluginOfTool, type PluginId } from "@/lib/plugins/catalog";
+import { actionDraft, isPluginAction, isPluginTool, PLUGIN_BY_ID, pluginLinks, PLUGINS, pluginOfTool, type PluginId } from "@/lib/plugins/catalog";
 import { AppLogo } from "@/components/app-logos";
 import { pluginConfigured } from "@/lib/plugins/connect";
 import { runPluginTool } from "@/lib/plugins/run";
@@ -88,8 +87,6 @@ function errorText(code: string, label: string, appName: string): string {
     case "trial_expired": return "Your free trial has ended. Contact the Orbit team for next steps.";
     case "fx_not_configured": return "Usage billing is not configured yet. Contact the Orbit team.";
     case "incomplete_stream": return "The connection ended before the model finished. Your partial reply is saved.";
-    case "video_too_large": return "This video is too large for the chat input limit. Use a shorter video or paste the relevant transcript excerpt.";
-    case "video_check_failed": return "Couldn’t check this video’s input size, so no video answer was started. Try again or paste a transcript excerpt.";
     case "context_too_large": return "This request is too large for the chat context limit. Try fewer files or split the question into smaller parts.";
     case "provider_disabled": return `${appName} is turned off by the team right now. Try another app on the left.`;
     case "no_image_model": return `${appName} can't make images.`;
@@ -116,7 +113,6 @@ const STARTERS: { label: string; icon: string; text: string; mode?: StudyMode; u
 export function ChatApp({ email, userId }: { email: string; userId: string }) {
   const router = useRouter();
   const [provider, setProvider] = useState<ProviderId>("openai");
-  const [orbitMode, setOrbitMode] = useState(false);
   const [convs, setConvs] = useState<Record<ProviderId, ConvSummary[] | null>>(() => perProvider<ConvSummary[] | null>(() => null));
   const [projects, setProjects] = useState<Record<ProviderId, Project[]>>(() => perProvider<Project[]>(() => []));
   const [activeIds, setActiveIds] = useState<Record<ProviderId, string | null>>(() => perProvider<string | null>(() => null));
@@ -191,6 +187,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
   }, []);
   const [approvalMode, setApprovalMode] = useState<ApprovalMode>("ask"); // read from storage after mount
   const approvals = useRef(new Map<string, (approve: boolean) => void>()); // file changes waiting for Apply / Skip
+  const draftEdits = useRef(new Map<string, Record<string, string>>()); // the student's edits to a draft (e.g. an email) before confirming
   const fileInput = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
@@ -282,15 +279,12 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
 
   useEffect(() => {
     let saved: ProviderId = "openai";
-    let savedOrbit = false;
     try {
-      const v = localStorage.getItem(APP_KEY);
-      if (v === "orbit") savedOrbit = true;
-      else if (v && PROVIDERS.includes(v as ProviderId)) saved = v as ProviderId;
+      const v = localStorage.getItem(APP_KEY) as ProviderId | null;
+      if (v && PROVIDERS.includes(v)) saved = v;
     } catch {}
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setProvider(saved);
-    setOrbitMode(savedOrbit);
     setReady(true);
     loadUsage();
     setApprovalMode(loadApprovalMode());
@@ -306,7 +300,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
     // Wait until the saved choice is restored, or we'd overwrite it (React runs effects twice in dev).
     if (!ready) return;
     try {
-      localStorage.setItem(APP_KEY, orbitMode ? "orbit" : provider);
+      localStorage.setItem(APP_KEY, provider);
     } catch {}
     if (convs[provider] !== null) return;
     (async () => {
@@ -328,7 +322,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       setProjects((prev) => ({ ...prev, [provider]: projs }));
       setActiveIds((prev) => (prev[provider] ? prev : { ...prev, [provider]: list[0]?.id ?? null }));
     })();
-  }, [ready, provider, orbitMode, convs, handleAuth]);
+  }, [ready, provider, convs, handleAuth]);
 
   // Load an opened chat's messages once.
   useEffect(() => {
@@ -786,8 +780,29 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       if (isPluginTool(c.name)) {
         // Apps the student connected (Plugins page): run here with their own sign-in. If it isn't connected,
         // show Connect in the chat and carry on once they've signed in (or tell the AI they chose not to).
-        setAct({ status: "running" });
-        let r = await runPluginTool(c.name, c.args);
+        let args = c.args;
+        if (isPluginAction(c.name)) {
+          // Actions in an app (send an email, rename a Drive file…): always show it (editable) and wait for the
+          // student's OK, whatever the approval setting.
+          if (c.name === "gmail_send" || c.name === "gmail_create_draft") setAct({ status: "waiting", email: { to: String(c.args.to ?? ""), cc: String(c.args.cc ?? ""), subject: String(c.args.subject ?? ""), body: String(c.args.body ?? "") } });
+          else setAct({ status: "waiting", action: actionDraft(c.name, c.args) ?? undefined });
+          const ok = await new Promise<boolean>((resolve) => {
+            approvals.current.set(actId, resolve);
+            if (signal.aborted) resolve(false);
+            signal.addEventListener("abort", () => resolve(false), { once: true });
+          });
+          approvals.current.delete(actId);
+          const edited = draftEdits.current.get(actId);
+          draftEdits.current.delete(actId);
+          if (!ok) {
+            setAct({ status: "declined", email: undefined, action: undefined });
+            results.push({ id: c.id, name: c.name, output: `The student chose not to ${c.name === "gmail_send" ? "send this email" : "do this"}. Don't try it again; ask what they'd like to change, or leave it.`, status: "declined" });
+            continue;
+          }
+          if (edited) args = { ...c.args, ...edited };
+          setAct({ status: "running", email: undefined, action: undefined, label: describeCall(c.name, args) });
+        } else setAct({ status: "running" });
+        let r = await runPluginTool(c.name, args);
         if (!r.ok && r.connect) {
           setAct({ status: "connect", connect: r.connect });
           const connected = await new Promise<boolean>((resolve) => {
@@ -802,11 +817,14 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
             continue;
           }
           setAct({ status: "running", connect: undefined });
-          r = await runPluginTool(c.name, c.args);
+          r = await runPluginTool(c.name, args);
         }
         if (r.ok) {
           setAct({ status: "ok", links: pluginLinks(c.name, r.output) });
-          results.push({ id: c.id, name: c.name, output: r.output, status: "ok" });
+          const changed = args === c.args ? "" : c.name === "gmail_send" || c.name === "gmail_create_draft"
+            ? `\nThe student edited the draft before confirming. Final version: to ${args.to}${args.cc ? `, cc ${args.cc}` : ""}; subject: ${args.subject}\n${args.body}`
+            : "\nThe student edited it before confirming (the result above is the final version).";
+          results.push({ id: c.id, name: c.name, output: r.output + changed, status: "ok" });
         } else {
           setAct({ status: "error", detail: r.error, connect: undefined });
           results.push({ id: c.id, name: c.name, output: `Error: ${r.error}`, status: "error" });
@@ -1164,17 +1182,11 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
   const remaining = usage?.live ? usage.allowance - usage.spent - usage.reserved : 0;
   const usedPct = usage?.live && usage.allowance > 0 ? Math.min(100, ((usage.spent + usage.reserved) / usage.allowance) * 100) : 0;
 
-  if (orbitMode) return <OrbitChat onSelectProvider={(p) => { setOrbitMode(false); pickProvider(p); }} />;
-
   return (
     <div data-theme={provider} className="flex h-dvh bg-surface-000 font-ui text-ink">
       {/* App rail */}
       <nav aria-label="AI apps" className="hidden w-[76px] shrink-0 flex-col items-center gap-3 border-r border-line bg-surface-100 py-4 md:flex">
         <Image src="/brand/orbit-mark.png" alt="Orbit AI" width={32} height={32} className="logo-mono mb-3 h-8 w-8 object-contain" />
-        <button onClick={() => setOrbitMode(true)} disabled={busy} title="Orbit mode" className="flex flex-col items-center gap-1 disabled:opacity-50">
-          <span className="grid h-11 w-11 place-items-center rounded-2xl border border-line text-2xl text-brand hover:bg-surface-200">◎</span>
-          <span className="text-[11px] text-ink-muted">Orbit</span>
-        </button>
         {PROVIDERS.map((p) => {
           const on = p === provider;
           return (
@@ -1382,7 +1394,6 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
             </div>
           )}
           <div className={`flex gap-1 md:hidden ${(active && projects[provider].length > 0) || exportable.some((m) => m.role === "assistant") ? "" : "ml-auto"}`} role="group" aria-label="AI apps">
-            <button onClick={() => setOrbitMode(true)} disabled={busy} aria-label="Orbit mode" className="grid h-9 w-9 place-items-center rounded-xl text-xl text-brand">◎</button>
             {PROVIDERS.map((p) => (
               <button key={p} onClick={() => pickProvider(p)} disabled={busy && p !== provider} aria-pressed={p === provider} aria-label={THEMES[p].appName}
                 className={`grid h-9 w-9 place-items-center rounded-xl ${p === provider ? "bg-surface-300" : ""}`}>
@@ -1516,7 +1527,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
                           <div className="mb-1.5 text-xs font-medium text-ink-subtle">{imageModel?.label ?? "Image"}</div>
                         )}
                         {m.activity && m.activity.length > 0 && (
-                          <FolderActivity items={m.activity} onDecide={(id, ok) => approvals.current.get(id)?.(ok)} onRun={codeOk ? rerunPython : undefined} />
+                          <FolderActivity items={m.activity} onDecide={(id, ok, edits) => { if (edits) draftEdits.current.set(id, edits); approvals.current.get(id)?.(ok); }} onRun={codeOk ? rerunPython : undefined} />
                         )}
                         {m.kind === "image" ? (
                           m.status === "streaming" ? (

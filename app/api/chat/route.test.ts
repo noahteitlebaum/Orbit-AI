@@ -376,7 +376,7 @@ describe("plugins and skills", () => {
 
   it("plugins without tools add nothing", async () => {
     state.live = true;
-    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "hi", plugins: ["youtube", "google-drive"] })));
+    await readEvents(await POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "hi", plugins: ["youtube"] })));
     expect(state.lastArgs!.tools).toBeUndefined();
     expect(state.lastArgs!.system).not.toContain("connected these apps");
   });

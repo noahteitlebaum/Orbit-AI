@@ -112,6 +112,43 @@ describe("mail & calendar", () => {
   });
 });
 
+describe("gmail sending", () => {
+  it("parses recipients and builds a UTF-8 message Gmail accepts", async () => {
+    const { parseAddresses, buildRawEmail } = await import("./mail-calendar");
+    expect(parseAddresses("ta@uwo.ca, Prof Smith <p.smith@uwo.ca>; ")).toEqual(["ta@uwo.ca", "p.smith@uwo.ca"]);
+    expect(() => parseAddresses("not an email")).toThrow(/isn't an email/);
+    const raw = buildRawEmail({ to: ["ta@uwo.ca"], cc: [], subject: "Extension — lab 3\nBcc: x@evil.com", body: "Hi,\nCan I get 2 days? 🙏", inReplyTo: "<abc@mail>" });
+    expect(raw).toMatch(/^[A-Za-z0-9_-]+$/);
+    const text = new TextDecoder().decode(Uint8Array.from(atob(raw.replace(/-/g, "+").replace(/_/g, "/")), (c) => c.charCodeAt(0)));
+    expect(text).toContain("To: ta@uwo.ca\r\n");
+    expect(text).not.toMatch(/^Bcc:/m); // no header injection through the subject
+    expect(text).toMatch(/^Subject: =\?UTF-8\?B\?/m);
+    expect(text).toContain("In-Reply-To: <abc@mail>");
+    const body = text.split("\r\n\r\n")[1].replace(/\r\n/g, "");
+    expect(new TextDecoder().decode(Uint8Array.from(atob(body), (c) => c.charCodeAt(0)))).toBe("Hi,\r\nCan I get 2 days? 🙏");
+  });
+  it("sends with the gmail.send permission and keeps replies in their thread", async () => {
+    vi.resetModules();
+    const scopes: string[][] = [];
+    vi.doMock("./google-drive", () => ({ googleToken: async (s: string[]) => { scopes.push(s); return "g-token"; } }));
+    const calls: { url: string; body?: string }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit) => {
+      calls.push({ url, body: init.body as string | undefined });
+      if (url.endsWith("/messages/send")) return new Response(JSON.stringify({ id: "sent1" }));
+      return new Response(JSON.stringify({ id: "m1", threadId: "t1", payload: { headers: [{ name: "Message-ID", value: "<orig@mail>" }, { name: "Subject", value: "Lab 3" }] } }));
+    }));
+    const m = await import("./mail-calendar");
+    const out = await m.sendGmail({ to: "ta@uwo.ca", cc: "", subject: "", body: "Thanks!", replyTo: "m1" });
+    expect(out).toEqual({ id: "sent1", to: ["ta@uwo.ca"] });
+    expect(scopes).toEqual([[m.GMAIL_SEND_SCOPE.replace("send", "readonly")], [m.GMAIL_SEND_SCOPE]]);
+    const sent = JSON.parse(calls[1].body!) as { raw: string; threadId: string };
+    expect(sent.threadId).toBe("t1");
+    expect(atob(sent.raw.replace(/-/g, "+").replace(/_/g, "/"))).toContain("Subject: Re: Lab 3");
+    await expect(m.sendGmail({ to: "", cc: "", subject: "x", body: "y" })).rejects.toThrow(/Who should it go to/);
+    vi.doUnmock("./google-drive");
+  });
+});
+
 describe("outlook (Microsoft Graph)", () => {
   it("searches, reads and lists events with read-only scopes", async () => {
     vi.resetModules();

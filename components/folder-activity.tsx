@@ -2,7 +2,7 @@
 
 import { useState } from "react";
 import type { RunOutput, RunResult } from "@/lib/code/runner";
-import { PLUGIN_BY_ID, pluginOfTool, type PluginId, type PluginLink } from "@/lib/plugins/catalog";
+import { PLUGIN_BY_ID, pluginOfTool, type ActionDraft, type PluginId, type PluginLink } from "@/lib/plugins/catalog";
 import { AppLogo } from "./app-logos";
 import { PluginConnect } from "./plugin-connect";
 
@@ -21,7 +21,11 @@ export type Activity = {
   outputs?: RunOutput[]; // run_python: files it saved (only while the page is open)
   connect?: PluginId;    // a plugin the AI needs that isn't connected yet (status "connect")
   links?: PluginLink[];  // pages a plugin read (shown as Sources under the answer)
+  email?: EmailFields;   // gmail_send: the draft waiting for Send (status "waiting")
+  action?: ActionDraft;  // another app action waiting for the student's OK (rename a Drive file…)
 };
+type EmailFields = { to: string; cc: string; subject: string; body: string };
+export type Decide = (id: string, approve: boolean, edits?: Record<string, string>) => void;
 
 const clip = (s: string | undefined, n: number) => (s && s.length > n ? `${s.slice(0, n)}\n…` : s);
 
@@ -170,7 +174,73 @@ function StepsSummary({ items }: { items: Activity[] }) {
   );
 }
 
-export function FolderActivity({ items, onDecide, onRun }: { items: Activity[]; onDecide: (id: string, approve: boolean) => void; onRun?: RerunPython }) {
+/** An email the AI wrote, waiting for the student: they can edit any field, then Send or not. */
+function EmailDraftCard({ a, onDecide }: { a: Activity & { email: EmailFields }; onDecide: Decide }) {
+  const [f, setF] = useState<EmailFields>(a.email);
+  const [showCc, setShowCc] = useState(Boolean(a.email.cc));
+  const set = (k: keyof EmailFields) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setF((x) => ({ ...x, [k]: e.target.value }));
+  const edited = (Object.keys(f) as (keyof EmailFields)[]).some((k) => f[k] !== a.email[k]);
+  const draftOnly = a.name === "gmail_create_draft";
+  const row = "flex items-center gap-2 border-b border-line px-3 py-1.5 text-sm";
+  const input = "min-w-0 flex-1 bg-transparent py-0.5 outline-none placeholder:text-ink-subtle";
+  return (
+    <li className="overflow-hidden rounded-2xl border border-line-strong bg-surface-000 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+      <div className="flex items-center gap-2 bg-surface-100 px-3 py-2">
+        <AppLogo id={pluginOfTool(a.name)!} size={18} />
+        <span className="text-sm font-medium">{draftOnly ? "Save this draft in Gmail?" : "Send this email?"}</span>
+        <span className="ml-auto text-xs text-ink-subtle">{draftOnly ? "It won't be sent" : "Nothing is sent until you click Send"}</span>
+      </div>
+      <label className={row}><span className="w-14 shrink-0 text-ink-muted">To</span>
+        <input value={f.to} onChange={set("to")} className={input} aria-label="To" spellCheck={false} />
+        {!showCc && <button type="button" onClick={() => setShowCc(true)} className="text-xs text-ink-muted hover:text-ink">Cc</button>}
+      </label>
+      {showCc && <label className={row}><span className="w-14 shrink-0 text-ink-muted">Cc</span><input value={f.cc} onChange={set("cc")} className={input} aria-label="Cc" spellCheck={false} /></label>}
+      <label className={row}><span className="w-14 shrink-0 text-ink-muted">Subject</span><input value={f.subject} onChange={set("subject")} className={`${input} font-medium`} aria-label="Subject" /></label>
+      <textarea value={f.body} onChange={set("body")} aria-label="Email text" rows={Math.min(14, Math.max(4, f.body.split("\n").length + 1))}
+        className="block w-full resize-y bg-transparent px-3 py-2.5 text-sm leading-relaxed outline-none" />
+      <div className="flex items-center gap-2 border-t border-line px-3 py-2.5">
+        <button type="button" disabled={(!draftOnly && !f.to.trim()) || !f.body.trim()} onClick={() => onDecide(a.id, true, edited ? { ...f } : undefined)}
+          className="rounded-full bg-brand px-4 py-1.5 text-sm font-medium text-on-brand disabled:opacity-50">{draftOnly ? "Save draft" : "Send"}</button>
+        <button type="button" onClick={() => onDecide(a.id, false)} className="rounded-full border border-line-strong px-4 py-1.5 text-sm font-medium hover:bg-surface-300">{draftOnly ? "Cancel" : "Don't send"}</button>
+      </div>
+    </li>
+  );
+}
+
+/** Any other app action (rename a file, create a Doc): what will happen, editable, then confirm or cancel. */
+function ActionCard({ a, onDecide }: { a: Activity & { action: ActionDraft }; onDecide: Decide }) {
+  const [vals, setVals] = useState<Record<string, string>>(() => Object.fromEntries(a.action.fields.map((f) => [f.key, f.value])));
+  const edited = a.action.fields.some((f) => vals[f.key] !== f.value);
+  const empty = a.action.fields.some((f) => !f.optional && !vals[f.key]?.trim());
+  return (
+    <li className="overflow-hidden rounded-2xl border border-line-strong bg-surface-000 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
+      <div className="flex items-center gap-2 bg-surface-100 px-3 py-2">
+        <AppLogo id={pluginOfTool(a.name)!} size={18} />
+        <span className="text-sm font-medium">{a.action.title}</span>
+        <span className="ml-auto text-xs text-ink-subtle">Nothing changes until you confirm</span>
+      </div>
+      {a.action.note && <p className="border-b border-line px-3 py-1.5 text-sm text-ink-muted">{a.action.note}</p>}
+      {a.action.fields.map((f) => (
+        <label key={f.key} className={`flex gap-2 border-b border-line px-3 py-1.5 text-sm ${f.multiline ? "flex-col" : "items-center"}`}>
+          <span className="w-20 shrink-0 text-ink-muted">{f.label}</span>
+          {f.multiline ? (
+            <textarea value={vals[f.key]} onChange={(e) => setVals((v) => ({ ...v, [f.key]: e.target.value }))} rows={Math.min(14, Math.max(4, (vals[f.key] ?? "").split("\n").length + 1))}
+              className="block w-full resize-y bg-transparent leading-relaxed outline-none" aria-label={f.label} />
+          ) : (
+            <input value={f.when ? (vals[f.key] ?? "").slice(0, 16) : vals[f.key]} onChange={(e) => setVals((v) => ({ ...v, [f.key]: e.target.value }))} aria-label={f.label}
+              type={f.when ? (/T/.test(f.value || vals.start || "") ? "datetime-local" : "date") : "text"} className="min-w-0 flex-1 bg-transparent py-0.5 font-medium outline-none" />
+          )}
+        </label>
+      ))}
+      <div className="flex items-center gap-2 px-3 py-2.5">
+        <button type="button" disabled={empty} onClick={() => onDecide(a.id, true, edited ? vals : undefined)} className={`rounded-full px-4 py-1.5 text-sm font-medium disabled:opacity-50 ${a.action.danger ? "bg-danger text-white" : "bg-brand text-on-brand"}`}>{a.action.confirm}</button>
+        <button type="button" onClick={() => onDecide(a.id, false)} className="rounded-full border border-line-strong px-4 py-1.5 text-sm font-medium hover:bg-surface-300">Cancel</button>
+      </div>
+    </li>
+  );
+}
+
+export function FolderActivity({ items, onDecide, onRun }: { items: Activity[]; onDecide: Decide; onRun?: RerunPython }) {
   const quiet = items.filter((a) => a.name !== "run_python" && a.status !== "waiting" && a.status !== "connect");
   const rest = items.filter((a) => !quiet.includes(a));
   return (
@@ -190,6 +260,10 @@ export function FolderActivity({ items, onDecide, onRun }: { items: Activity[]; 
               <button type="button" onClick={() => onDecide(a.id, false)} className="rounded-full border border-line-strong px-3.5 py-1.5 text-sm font-medium hover:bg-surface-300">Not now</button>
             </div>
           </li>
+        ) : a.status === "waiting" && a.email ? (
+          <EmailDraftCard key={a.id} a={a as Activity & { email: EmailFields }} onDecide={onDecide} />
+        ) : a.status === "waiting" && a.action ? (
+          <ActionCard key={a.id} a={a as Activity & { action: ActionDraft }} onDecide={onDecide} />
         ) : a.status === "waiting" ? (
           <li key={a.id} className="rounded-2xl border border-line-strong bg-surface-100 p-3">
             <p className="text-sm font-medium">{a.label}</p>
