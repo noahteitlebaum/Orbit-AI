@@ -6,7 +6,11 @@ import {
 import { googleToken, googleTokenCached } from "@/lib/connectors/google-drive";
 import { googleEvents, MAIL_LIMITS, sendGmail, draftGmail, modifyGmail, trashGmail, createGoogleEvent, updateGoogleEvent, deleteGoogleEvent, GMAIL_CHANGES, type GmailChange, outlookEvents, readGmail, readOutlook, searchGmail, searchOutlook, type CalEvent, type MailFull, type MailSummary } from "@/lib/connectors/mail-calendar";
 import { notionSession, readNotion, searchNotion } from "@/lib/connectors/notion-client";
-import { msToken, msTokenSilent, searchOneDrive } from "@/lib/connectors/onedrive";
+import { msToken, msTokenSilent, listOneDrive, searchOneDrive } from "@/lib/connectors/onedrive";
+import {
+  appendExcelRows, createOneDriveFolder, createOutlookEvent, deleteOutlookEvent, draftOutlook, modifyOutlook, moveOneDrive, OUTLOOK_CHANGES,
+  renameOneDrive, sendOutlook, trashOneDrive, trashOutlook, updateOutlookEvent, uploadOneDrive, type OutlookChange,
+} from "@/lib/connectors/microsoft-actions";
 import { ConnectorError } from "@/lib/connectors/types";
 import { readZotero, searchZotero, zoteroAuth, zoteroItems } from "@/lib/connectors/zotero";
 import { PLUGIN_BY_ID, pluginOfTool, type PluginId } from "./catalog";
@@ -54,7 +58,7 @@ export async function runPluginTool(name: string, args: Record<string, unknown>)
     // Sign-in check first, without pop-ups (those need the student's click: the chat shows a Connect button).
     // Sending asks Google for send permission itself (the student just clicked Send, so its pop-up is allowed).
     if (plugin.auth === "google" && !plugin.tools.some((t) => t.name === name && t.write) && !googleTokenCached(plugin.scopes ?? [])) return notConnected();
-    if (plugin.auth === "microsoft" && !(await msTokenSilent(plugin.scopes ?? []))) return notConnected();
+    if (plugin.auth === "microsoft" && !plugin.tools.some((t) => t.name === name && t.write) && !(await msTokenSilent(plugin.scopes ?? []))) return notConnected();
     if (plugin.auth === "notion" && !notionSession()) return notConnected();
     if (plugin.auth === "zotero" && !zoteroAuth()) return notConnected();
     if (isPublicTool(name)) return await viaServer(name, args);
@@ -152,6 +156,17 @@ async function call(name: string, a: Record<string, unknown>): Promise<string> {
     case "outlook_search": return mailList(await searchOutlook(str(a.query)));
     case "outlook_read": return mailFull(await readOutlook(list(a.ids).slice(0, MAIL_LIMITS.pick)));
     case "google_calendar_events": { const n = days(a.days); return eventList(await googleEvents(new Date(), n), n); }
+    case "outlook_send": return sendOutlook({ to: str(a.to), cc: str(a.cc), subject: str(a.subject), body: typeof a.body === "string" ? a.body : "", replyTo: str(a.reply_to) || undefined });
+    case "outlook_create_draft": return draftOutlook({ to: str(a.to), cc: str(a.cc), subject: str(a.subject), body: typeof a.body === "string" ? a.body : "", replyTo: str(a.reply_to) || undefined });
+    case "outlook_modify": {
+      const change = OUTLOOK_CHANGES.find((c) => c === str(a.change));
+      if (!change) throw new ConnectorError(`Unknown change. Use one of: ${OUTLOOK_CHANGES.join(", ")}.`);
+      return modifyOutlook(list(a.ids), change as OutlookChange, str(a.category));
+    }
+    case "outlook_trash": return trashOutlook(list(a.ids));
+    case "outlook_calendar_create_event": return createOutlookEvent({ title: str(a.title), start: str(a.start), end: str(a.end), location: str(a.location), description: str(a.description) });
+    case "outlook_calendar_update_event": return updateOutlookEvent(str(a.id), { title: str(a.title), start: str(a.start), end: str(a.end), location: str(a.location), description: str(a.description) });
+    case "outlook_calendar_delete_event": return deleteOutlookEvent(str(a.id));
     case "outlook_calendar_events": { const n = days(a.days); return eventList(await outlookEvents(new Date(), n), n); }
     // ---------------------------------------------------------------- Google Drive
     case "google_drive_search": {
@@ -170,10 +185,28 @@ async function call(name: string, a: Record<string, unknown>): Promise<string> {
     case "google_drive_trash": return trashDrive(str(a.id));
     // ---------------------------------------------------------------- OneDrive
     case "onedrive_search": {
-      const r = (await searchOneDrive(str(a.query))).filter((x) => !x.folder).slice(0, 25);
-      return r.length ? r.map((x) => `id: ${x.id}\nname: ${x.name}\nsize: ${Math.max(1, Math.round((x.size ?? 0) / 1000))} KB${x.lastModifiedDateTime ? `\nmodified: ${x.lastModifiedDateTime.slice(0, 10)}` : ""}`).join("\n\n") : "No files found.";
+      const r = (await searchOneDrive(str(a.query))).slice(0, 25);
+      return r.length ? r.map((x) => `id: ${x.id}\nname: ${x.name}\n${x.folder ? `type: folder (${x.folder.childCount ?? 0} items)` : `size: ${Math.max(1, Math.round((x.size ?? 0) / 1000))} KB`}${x.lastModifiedDateTime ? `\nmodified: ${x.lastModifiedDateTime.slice(0, 10)}` : ""}`).join("\n\n") : "No files found.";
     }
     case "onedrive_read": return readOneDrive(str(a.id));
+    case "onedrive_list_folder": {
+      const items = await listOneDrive(str(a.id) || null);
+      return items.length ? items.map((x) => `id: ${x.id} · ${x.name}${x.folder ? " (folder)" : ""}`).join("\n") : "This folder is empty.";
+    }
+    case "onedrive_rename": return renameOneDrive(str(a.id), str(a.new_name));
+    case "onedrive_create_folder": return createOneDriveFolder(str(a.name), str(a.parent_id));
+    case "onedrive_move": return moveOneDrive(str(a.id), str(a.folder_id));
+    case "onedrive_trash": return trashOneDrive(str(a.id));
+    case "onedrive_create_word_doc": {
+      const { docxBlob } = await import("@/lib/export/office");
+      const title = str(a.title) || "Untitled";
+      return uploadOneDrive({ folder: str(a.folder_id), name: `${title.replace(/\.docx$/i, "")}.docx` }, await docxBlob(title, typeof a.content === "string" ? a.content : ""));
+    }
+    case "onedrive_save_text_file": {
+      const text = typeof a.content === "string" ? a.content : "";
+      return uploadOneDrive(str(a.id) ? { id: str(a.id) } : { folder: str(a.folder_id), name: str(a.name) || "Untitled.txt" }, new Blob([text], { type: "text/plain" }));
+    }
+    case "excel_append_rows": return appendExcelRows(str(a.id), parseCsv(typeof a.rows === "string" ? a.rows : ""), str(a.sheet));
     // ---------------------------------------------------------------- Notion, Zotero
     case "notion_search": {
       const r = await searchNotion(notionSession()!.token, str(a.query));

@@ -180,26 +180,28 @@ function EmailDraftCard({ a, onDecide }: { a: Activity & { email: EmailFields };
   const [showCc, setShowCc] = useState(Boolean(a.email.cc));
   const set = (k: keyof EmailFields) => (e: React.ChangeEvent<HTMLInputElement | HTMLTextAreaElement>) => setF((x) => ({ ...x, [k]: e.target.value }));
   const edited = (Object.keys(f) as (keyof EmailFields)[]).some((k) => f[k] !== a.email[k]);
-  const draftOnly = a.name === "gmail_create_draft";
+  const draftOnly = a.name.endsWith("_create_draft");
+  const replying = a.detail === "reply";
+  const app = PLUGIN_BY_ID.get(pluginOfTool(a.name)!)?.name.replace(/ Email$/, "") ?? "your email";
   const row = "flex items-center gap-2 border-b border-line px-3 py-1.5 text-sm";
   const input = "min-w-0 flex-1 bg-transparent py-0.5 outline-none placeholder:text-ink-subtle";
   return (
     <li className="overflow-hidden rounded-2xl border border-line-strong bg-surface-000 shadow-[0_1px_2px_rgba(0,0,0,0.04)]">
       <div className="flex items-center gap-2 bg-surface-100 px-3 py-2">
         <AppLogo id={pluginOfTool(a.name)!} size={18} />
-        <span className="text-sm font-medium">{draftOnly ? "Save this draft in Gmail?" : "Send this email?"}</span>
+        <span className="text-sm font-medium">{draftOnly ? `Save this draft in ${app}?` : replying ? "Send this reply?" : "Send this email?"}</span>
         <span className="ml-auto text-xs text-ink-subtle">{draftOnly ? "It won't be sent" : "Nothing is sent until you click Send"}</span>
       </div>
       <label className={row}><span className="w-14 shrink-0 text-ink-muted">To</span>
-        <input value={f.to} onChange={set("to")} className={input} aria-label="To" spellCheck={false} />
+        <input value={f.to} onChange={set("to")} className={input} aria-label="To" spellCheck={false} placeholder={replying ? "The person you're replying to" : ""} />
         {!showCc && <button type="button" onClick={() => setShowCc(true)} className="text-xs text-ink-muted hover:text-ink">Cc</button>}
       </label>
       {showCc && <label className={row}><span className="w-14 shrink-0 text-ink-muted">Cc</span><input value={f.cc} onChange={set("cc")} className={input} aria-label="Cc" spellCheck={false} /></label>}
-      <label className={row}><span className="w-14 shrink-0 text-ink-muted">Subject</span><input value={f.subject} onChange={set("subject")} className={`${input} font-medium`} aria-label="Subject" /></label>
+      <label className={row}><span className="w-14 shrink-0 text-ink-muted">Subject</span><input value={f.subject} onChange={set("subject")} className={`${input} font-medium`} aria-label="Subject" placeholder={replying ? "Re: the original subject" : ""} /></label>
       <textarea value={f.body} onChange={set("body")} aria-label="Email text" rows={Math.min(14, Math.max(4, f.body.split("\n").length + 1))}
         className="block w-full resize-y bg-transparent px-3 py-2.5 text-sm leading-relaxed outline-none" />
       <div className="flex items-center gap-2 border-t border-line px-3 py-2.5">
-        <button type="button" disabled={(!draftOnly && !f.to.trim()) || !f.body.trim()} onClick={() => onDecide(a.id, true, edited ? { ...f } : undefined)}
+        <button type="button" disabled={(!draftOnly && !replying && !f.to.trim()) || !f.body.trim()} onClick={() => onDecide(a.id, true, edited ? { ...f } : undefined)}
           className="rounded-full bg-brand px-4 py-1.5 text-sm font-medium text-on-brand disabled:opacity-50">{draftOnly ? "Save draft" : "Send"}</button>
         <button type="button" onClick={() => onDecide(a.id, false)} className="rounded-full border border-line-strong px-4 py-1.5 text-sm font-medium hover:bg-surface-300">{draftOnly ? "Cancel" : "Don't send"}</button>
       </div>

@@ -105,6 +105,9 @@ function errorText(code: string, label: string, appName: string): string {
 }
 
 // Starter suggestions under the empty-chat composer (like the apps' prompt chips), tuned for studying.
+// Actions shown as an editable email (To, Cc, Subject, text) before the student confirms.
+const EMAIL_TOOLS = new Set(["gmail_send", "gmail_create_draft", "outlook_send", "outlook_create_draft"]);
+
 const STARTERS: { label: string; icon: string; text: string; mode?: StudyMode; upload?: boolean }[] = [
   { label: "Explain a concept", icon: "💡", text: "", mode: "explain" },
   { label: "Quiz me", icon: "🎯", text: "", mode: "quiz" },
@@ -791,7 +794,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
         if (isPluginAction(c.name)) {
           // Actions in an app (send an email, rename a Drive file…): always show it (editable) and wait for the
           // student's OK, whatever the approval setting.
-          if (c.name === "gmail_send" || c.name === "gmail_create_draft") setAct({ status: "waiting", email: { to: String(c.args.to ?? ""), cc: String(c.args.cc ?? ""), subject: String(c.args.subject ?? ""), body: String(c.args.body ?? "") } });
+          if (EMAIL_TOOLS.has(c.name)) setAct({ status: "waiting", detail: c.args.reply_to ? "reply" : undefined, email: { to: String(c.args.to ?? ""), cc: String(c.args.cc ?? ""), subject: String(c.args.subject ?? ""), body: String(c.args.body ?? "") } });
           else setAct({ status: "waiting", action: actionDraft(c.name, c.args) ?? undefined });
           const ok = await new Promise<boolean>((resolve) => {
             approvals.current.set(actId, resolve);
@@ -803,7 +806,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
           draftEdits.current.delete(actId);
           if (!ok) {
             setAct({ status: "declined", email: undefined, action: undefined });
-            results.push({ id: c.id, name: c.name, output: `The student chose not to ${c.name === "gmail_send" ? "send this email" : "do this"}. Don't try it again; ask what they'd like to change, or leave it.`, status: "declined" });
+            results.push({ id: c.id, name: c.name, output: `The student chose not to ${/_send$/.test(c.name) ? "send this email" : "do this"}. Don't try it again; ask what they'd like to change, or leave it.`, status: "declined" });
             continue;
           }
           if (edited) args = { ...c.args, ...edited };
@@ -828,7 +831,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
         }
         if (r.ok) {
           setAct({ status: "ok", links: pluginLinks(c.name, r.output) });
-          const changed = args === c.args ? "" : c.name === "gmail_send" || c.name === "gmail_create_draft"
+          const changed = args === c.args ? "" : EMAIL_TOOLS.has(c.name)
             ? `\nThe student edited the draft before confirming. Final version: to ${args.to}${args.cc ? `, cc ${args.cc}` : ""}; subject: ${args.subject}\n${args.body}`
             : "\nThe student edited it before confirming (the result above is the final version).";
           results.push({ id: c.id, name: c.name, output: r.output + changed, status: "ok" });

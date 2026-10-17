@@ -2,7 +2,8 @@
 // emails to bring in, or brings in their next two weeks of events; Orbit bundles them into one Markdown file that
 // goes through the normal upload. Nothing is changed or deleted, and tokens stay in the browser. The one exception is
 // sendGmail (gmail.send), which only runs after the student reviews the draft and clicks Send.
-//  - Outlook / Outlook Calendar: Microsoft Graph, delegated Mail.Read / Calendars.Read (same Microsoft app as OneDrive).
+//  - Outlook / Outlook Calendar: Microsoft Graph, delegated Mail.Read / Calendars.Read (same Microsoft app as OneDrive);
+//    changes are in microsoft-actions.ts.
 //  - Gmail / Google Calendar: gmail.readonly ("restricted": fine for test users; public launch needs Google's security
 //    assessment) and calendar.readonly ("sensitive": needs Google's app verification before launch).
 import { googleToken } from "./google-drive";
@@ -109,10 +110,10 @@ export async function readOutlook(ids: string[]): Promise<MailFull[]> {
 export async function outlookEvents(from = new Date(), days = MAIL_LIMITS.days): Promise<CalEvent[]> {
   const to = new Date(from.getTime() + days * 86_400_000);
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const out = await msGet<{ value: { subject?: string; start: { dateTime: string }; end: { dateTime: string }; isAllDay?: boolean; location?: { displayName?: string }; bodyPreview?: string }[] }>(
-    `/me/calendarView?startDateTime=${from.toISOString()}&endDateTime=${to.toISOString()}&$top=200&$orderby=start/dateTime&$select=subject,start,end,isAllDay,location,bodyPreview`,
+  const out = await msGet<{ value: { id?: string; subject?: string; start: { dateTime: string }; end: { dateTime: string }; isAllDay?: boolean; location?: { displayName?: string }; bodyPreview?: string }[] }>(
+    `/me/calendarView?startDateTime=${from.toISOString()}&endDateTime=${to.toISOString()}&$top=200&$orderby=start/dateTime&$select=id,subject,start,end,isAllDay,location,bodyPreview`,
     ["Calendars.Read"], "Outlook Calendar", { Prefer: `outlook.timezone="${tz}"` });
-  return out.value.map((e) => ({ title: e.subject ?? "", start: e.start.dateTime, end: e.end.dateTime, allDay: Boolean(e.isAllDay), location: e.location?.displayName ?? "", notes: e.bodyPreview ?? "" }));
+  return out.value.map((e) => ({ id: e.id, title: e.subject ?? "", start: e.start.dateTime, end: e.end.dateTime, allDay: Boolean(e.isAllDay), location: e.location?.displayName ?? "", notes: e.bodyPreview ?? "" }));
 }
 
 // ---------------------------------------------------------------- Google (Gmail, Calendar)

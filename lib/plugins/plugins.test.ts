@@ -12,9 +12,9 @@ describe("catalog", () => {
     const names = PLUGINS.flatMap((p) => p.tools.map((t) => t.name as string));
     expect(new Set(names).size).toBe(names.length);
     for (const p of PLUGINS) for (const t of p.tools) {
-      // Only Google apps can change things, and every change has a confirm card.
-      if (t.write) expect(["gmail", "google-calendar", "google-drive"]).toContain(p.id);
-      if (t.write && !["gmail_send", "gmail_create_draft"].includes(t.name as string)) expect(actionDraft(t.name, {})).not.toBeNull();
+      // Only Google and Microsoft apps can change things, and every change has a confirm card.
+      if (t.write) expect(["gmail", "google-calendar", "google-drive", "outlook", "outlook-calendar", "onedrive"]).toContain(p.id);
+      if (t.write && !/_send$|_create_draft$/.test(t.name as string)) expect(actionDraft(t.name, {})).not.toBeNull();
       expect(pluginOfTool(t.name)).toBe(p.id);
       expect(t.name).toMatch(/^[a-z_]{3,40}$/); // valid for every provider's tool-name rules
       for (const r of t.parameters.required) expect(t.parameters.properties[r]).toBeDefined();
@@ -202,5 +202,45 @@ describe("google write helpers", () => {
     expect(JSON.parse(calls.at(-1)!.body!)).toEqual({ values: [["Coffee", "4.50"], ["Books", "45"]] });
     expect(new Set(scopes)).toEqual(new Set(["https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/drive"]));
     vi.doUnmock("@/lib/connectors/google-drive");
+  });
+});
+
+describe("microsoft actions", () => {
+  it("pure helpers: recipients, event times, Excel columns", async () => {
+    const m = await import("@/lib/connectors/microsoft-actions");
+    expect(m.recipients("ta@uwo.ca; Prof <p@uwo.ca>")).toEqual([{ emailAddress: { address: "ta@uwo.ca" } }, { emailAddress: { address: "p@uwo.ca" } }]);
+    expect(() => m.recipients("nope")).toThrow(/isn't an email/);
+    expect(m.msEventTimes("2026-10-28T19:00", "", "America/Toronto")).toEqual({ isAllDay: false, start: { dateTime: "2026-10-28T19:00:00", timeZone: "America/Toronto" }, end: { dateTime: "2026-10-28T20:00:00", timeZone: "America/Toronto" } });
+    expect(m.msEventTimes("2026-10-31", "", "UTC")).toMatchObject({ isAllDay: true, start: { dateTime: "2026-10-31T00:00:00" }, end: { dateTime: "2026-11-01T00:00:00" } });
+    expect([1, 26, 27, 52, 703].map(m.colLetter)).toEqual(["A", "Z", "AA", "AZ", "AAA"]);
+  });
+  it("sends, replies, organizes and appends with the right Graph calls and permissions", async () => {
+    vi.resetModules();
+    const scopes: string[] = [];
+    vi.doMock("@/lib/connectors/onedrive", () => ({ msToken: async (s: string[]) => { scopes.push(...s); return "ms"; }, msTokenSilent: async () => null, listOneDrive: async () => [], searchOneDrive: async () => [] }));
+    const calls: { url: string; method?: string; body?: unknown }[] = [];
+    vi.stubGlobal("fetch", vi.fn(async (url: string, init: RequestInit = {}) => {
+      calls.push({ url, method: init.method, body: typeof init.body === "string" ? JSON.parse(init.body) : init.body });
+      if (url.includes("?$select=categories")) return Response.json({ categories: ["School"] });
+      if (url.includes("/worksheets?$select=name")) return Response.json({ value: [{ name: "Hours" }] });
+      if (url.includes("usedRange")) return Response.json({ address: "Hours!A1:C12", rowCount: 12 });
+      if (url.endsWith("/sendMail") || url.endsWith("/reply")) return new Response(null, { status: 202 });
+      return Response.json({ name: "x", webLink: "https://outlook.office.com/e" });
+    }));
+    const { runPluginTool } = await import("./run");
+    expect(await runPluginTool("outlook_send", { to: "ta@uwo.ca", subject: "Lab", body: "Hi" })).toEqual({ ok: true, output: "Sent to ta@uwo.ca." });
+    expect(calls.at(-1)).toMatchObject({ method: "POST", body: { message: { subject: "Lab", toRecipients: [{ emailAddress: { address: "ta@uwo.ca" } }] }, saveToSentItems: true } });
+    expect(await runPluginTool("outlook_send", { body: "Thanks!", reply_to: "AAMkAGI2" })).toMatchObject({ ok: true });
+    expect(calls.at(-1)!.url).toMatch(/\/me\/messages\/AAMkAGI2\/reply$/);
+    await runPluginTool("outlook_modify", { ids: "AAMkAGI2", change: "add_category", category: "Finance", description: "1" });
+    expect(calls.at(-1)).toMatchObject({ method: "PATCH", body: { categories: ["School", "Finance"] } });
+    await runPluginTool("outlook_trash", { ids: "AAMkAGI2", description: "1" });
+    expect(calls.at(-1)).toMatchObject({ body: { destinationId: "deleteditems" } });
+    expect(await runPluginTool("excel_append_rows", { id: "01ABCDEF", name: "Timesheet", rows: "Oct 17,3.5\nOct 18,2" })).toEqual({ ok: true, output: "Added 2 rows to Hours (A13:B14)." });
+    expect(calls.at(-1)).toMatchObject({ method: "PATCH", body: { values: [["Oct 17", "3.5"], ["Oct 18", "2"]] } });
+    expect(await runPluginTool("outlook_calendar_create_event", { title: "Finance midterm", start: "2026-10-28T19:00" })).toMatchObject({ ok: true });
+    expect(calls.at(-1)).toMatchObject({ method: "POST", body: { subject: "Finance midterm", isAllDay: false } });
+    expect(new Set(scopes)).toEqual(new Set(["Mail.Send", "Mail.ReadWrite", "Files.ReadWrite", "Calendars.ReadWrite"]));
+    vi.doUnmock("@/lib/connectors/onedrive");
   });
 });

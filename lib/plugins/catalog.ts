@@ -154,39 +154,86 @@ export const PLUGINS: PluginInfo[] = [
     ],
   },
   {
-    id: "outlook", name: "Outlook Email", tagline: "Find and read your Outlook email",
-    description: "Lets the AI search your Outlook or Western email and read the messages it finds. It can't send, delete or move anything.",
+    id: "outlook", name: "Outlook Email", tagline: "Read, write and organize your Outlook email",
+    description: "Lets the AI search and read your Outlook or Western email, write and send emails and replies, save drafts, and tidy your inbox (mark read, archive, flag, categorize, delete). You see every change first and nothing happens until you confirm.",
     category: "Mail & calendar", popular: true, auth: "microsoft", scopes: ["Mail.Read"],
-    permissions: ["Read your mail", "Never sends, deletes or moves email"],
-    can: ["Find announcements and course emails", "Summarize a thread", "Pull out deadlines"],
-    examples: ["Any emails from the registrar this month?", "What did my group say about the project?"],
+    permissions: ["Read your mail", "Send, draft and organize email, only after you confirm", "Deleting only moves email to Deleted Items"],
+    can: ["Find announcements and course emails", "Summarize a thread", "Write and send emails or replies after you check them", "Archive, flag, categorize or delete emails"],
+    examples: ["Any emails from the registrar this month?", "Reply to my TA saying I'll be at office hours", "Archive all the Western newsletters"],
     setup: "NEXT_PUBLIC_MICROSOFT_CLIENT_ID",
     tools: [
       tool("outlook_search", "Search the student's Outlook mail. Returns id, sender, subject, date and a preview.", { query: s("Words to search for. Empty = latest emails.") }),
       tool("outlook_read", "Read the full text of emails found with outlook_search.", { ids: s("Comma-separated email ids (up to 10).") }, ["ids"]),
+      action("outlook_send", "Send an email (or a reply) from the student's Outlook. Only when they ask to send. They see the draft, can edit it, and must click Send. Write the full, final email (no placeholders).", {
+        to: s("Recipient addresses, comma-separated (optional for a reply: it goes to the sender)."), cc: s("Cc addresses (optional)."),
+        subject: s("Subject (ignored for replies)."), body: s("The email text."), reply_to: s("Id of the email being replied to, from outlook_search (optional)."),
+      }, ["body"]),
+      action("outlook_create_draft", "Save an email or reply as a draft in Outlook without sending it. They confirm first.", {
+        to: s("Recipient addresses (optional)."), cc: s("Cc addresses (optional)."), subject: s("Subject."), body: s("The email text."), reply_to: s("Id of the email being replied to (optional)."),
+      }, ["body"]),
+      action("outlook_modify", "Change emails found with outlook_search: mark_read, mark_unread, archive, move_to_inbox, flag, unflag, add_category or remove_category. They confirm first.", {
+        ids: s("Comma-separated email ids from outlook_search (up to 50)."), change: s("One of: mark_read, mark_unread, archive, move_to_inbox, flag, unflag, add_category, remove_category."),
+        category: s("Category name, for add_category / remove_category."), description: s("Which emails, in a few words, shown to the student."),
+      }, ["ids", "change", "description"]),
+      action("outlook_trash", "Move emails to Deleted Items. Only when the student asks to delete them. They confirm first.", {
+        ids: s("Comma-separated email ids from outlook_search (up to 50)."), description: s("Which emails, in a few words, shown to the student."),
+      }, ["ids", "description"]),
     ],
   },
   {
-    id: "outlook-calendar", name: "Outlook Calendar", tagline: "See your Outlook events",
-    description: "Lets the AI see your Outlook calendar so it can plan around classes and deadlines. It can't add or change events.",
+    id: "outlook-calendar", name: "Outlook Calendar", tagline: "See, add and change your Outlook events",
+    description: "Lets the AI see your Outlook calendar so it can plan around classes and deadlines, and add, move or delete events for you. You see every change first and nothing happens until you confirm.",
     category: "Mail & calendar", auth: "microsoft", scopes: ["Calendars.Read"],
-    permissions: ["Read your calendars", "Never creates or changes events"],
-    can: ["Plan study time around your week", "List upcoming events"],
-    examples: ["When am I free tomorrow?"],
-    setup: "NEXT_PUBLIC_MICROSOFT_CLIENT_ID",
-    tools: [tool("outlook_calendar_events", "The student's Outlook calendar events from today forward.", { days: n("How many days ahead, 1-60. Default 14.") })],
-  },
-  {
-    id: "onedrive", name: "OneDrive", tagline: "Find files in OneDrive",
-    description: "Lets the AI find files in your OneDrive (Western or personal) and read text files. Word, PowerPoint and PDF files can be added to a chat from the + menu.",
-    category: "Files", auth: "microsoft", scopes: ["Files.Read"],
-    permissions: ["Read your files", "Never changes or deletes files"],
-    can: ["Find a file by name", "Read notes, code and CSV files"],
-    examples: ["Find my CS 2210 lab 3 files in OneDrive"],
+    permissions: ["Read your calendars", "Create, change and delete events, only after you confirm"],
+    can: ["Plan study time around your week", "List upcoming events", "Add study blocks, exams and deadlines", "Move or cancel events"],
+    examples: ["When am I free tomorrow?", "Add my finance midterm on Oct 28 at 7pm"],
     setup: "NEXT_PUBLIC_MICROSOFT_CLIENT_ID",
     tools: [
-      tool("onedrive_search", "Search the student's OneDrive for files by name or content.", { query: s("What to search for.") }, ["query"]),
-      tool("onedrive_read", "Read a text file (txt, md, csv, code…) from OneDrive by id from onedrive_search.", { id: s("File id.") }, ["id"]),
+      tool("outlook_calendar_events", "The student's Outlook calendar events from today forward, with their ids.", { days: n("How many days ahead, 1-60. Default 14.") }),
+      action("outlook_calendar_create_event", "Add an event to the student's Outlook calendar. Call once per event. They confirm first.", {
+        title: s("Event title."), start: s('Start. Local time "2026-10-20T14:00", or a date "2026-10-20" for an all-day event.'), end: s("End, same format (optional)."), location: s("Where (optional)."), description: s("Notes (optional)."),
+      }, ["title", "start"]),
+      action("outlook_calendar_update_event", "Change an event from outlook_calendar_events. Only give what changes. They confirm first.", {
+        id: s("Event id from outlook_calendar_events."), current_title: s("The event's current title (shown to the student)."), title: s("New title (optional)."),
+        start: s('New start (optional). Local time "2026-10-20T14:00", or a date "2026-10-20" for an all-day event.'), end: s("New end (optional)."), location: s("New location (optional)."), description: s("New notes (optional)."),
+      }, ["id", "current_title"]),
+      action("outlook_calendar_delete_event", "Delete an event from outlook_calendar_events. Only when the student asks. They confirm first.", {
+        id: s("Event id from outlook_calendar_events."), current_title: s("The event's title and time (shown to the student)."),
+      }, ["id", "current_title"]),
+    ],
+  },
+  {
+    id: "onedrive", name: "OneDrive", tagline: "Find, read and organize your OneDrive files",
+    description: "Lets the AI search your OneDrive (Western or personal), read your files (Word, PowerPoint, Excel, PDF, text), and make changes for you: save Word docs and text files, add rows to Excel, rename, organize into folders, or delete. You see every change first and nothing happens until you confirm.",
+    category: "Files", auth: "microsoft", scopes: ["Files.Read"],
+    permissions: ["Read your files", "Create, edit, rename, move and delete files, only after you confirm", "Deleting only moves files to the recycle bin"],
+    can: ["Find a file by name or content", "Read Word, PowerPoint, Excel and PDF files", "Save study guides as Word docs", "Add rows to an Excel sheet, rename and tidy folders"],
+    examples: ["Find my CS 2210 lab 3 files in OneDrive", "Save this study guide as a Word doc in my OneDrive", "Add today's hours to my timesheet"],
+    setup: "NEXT_PUBLIC_MICROSOFT_CLIENT_ID",
+    tools: [
+      tool("onedrive_search", "Search the student's OneDrive for files and folders by name or content.", { query: s("What to search for.") }, ["query"]),
+      tool("onedrive_read", "Read a file from OneDrive by id from onedrive_search (Word, PowerPoint, Excel, PDF, text, code).", { id: s("File id.") }, ["id"]),
+      tool("onedrive_list_folder", "List a OneDrive folder's contents (the top of the drive if no id).", { id: s("Folder id from onedrive_search (optional).") }),
+      action("onedrive_create_word_doc", "Save a new Word document (.docx) in OneDrive, e.g. notes or a study guide. Markdown headings, lists and tables become real Word formatting. They confirm first.", {
+        title: s("Document title (also the file name)."), content: s("The document in Markdown."), folder_id: s("Folder id to save in (optional; top of OneDrive if omitted)."),
+      }, ["title", "content"]),
+      action("onedrive_save_text_file", "Create a text file (.txt, .md, .csv, code…) in OneDrive, or replace a text file's contents (give its id). They confirm first.", {
+        name: s("File name with extension, for a new file."), id: s("Id of an existing text file to replace (optional)."), current_name: s("That file's name (shown to the student)."),
+        content: s("The full file text."), folder_id: s("Folder id for a new file (optional)."),
+      }, ["content"]),
+      action("excel_append_rows", "Add rows below the last used row of an Excel workbook in OneDrive. Read it first to match its columns. They confirm first.", {
+        id: s("Workbook id from onedrive_search."), name: s("The workbook's name (shown to the student)."), sheet: s("Sheet name (optional; first sheet if omitted)."), rows: s("The new rows as CSV, no header row."),
+      }, ["id", "name", "rows"]),
+      action("onedrive_rename", "Rename a file or folder in OneDrive. They confirm first.", {
+        id: s("Id from onedrive_search."), current_name: s("Its current name (shown to the student)."), new_name: s("The new name, with the extension for files."),
+      }, ["id", "new_name"]),
+      action("onedrive_create_folder", "Create a folder in OneDrive. They confirm first.", { name: s("Folder name."), parent_id: s("Id of the folder to put it in (optional).") }, ["name"]),
+      action("onedrive_move", "Move a file or folder into another OneDrive folder. They confirm first.", {
+        id: s("Id of the item to move."), name: s("Its name (shown to the student)."), folder_id: s("Destination folder id."), folder_name: s("Destination folder name (shown to the student)."),
+      }, ["id", "name", "folder_id", "folder_name"]),
+      action("onedrive_trash", "Delete a file or folder (it goes to the OneDrive recycle bin). Only when the student asks. They confirm first.", {
+        id: s("Id of the item."), name: s("Its name (shown to the student)."),
+      }, ["id", "name"]),
     ],
   },
   {
@@ -306,6 +353,21 @@ export function describePluginCall(name: string, args: Record<string, unknown>):
     gmail_trash: `Trash ${a("description") || "emails"}`,
     outlook_search: a("query") ? `Searched email for "${a("query")}"` : "Checked recent email",
     outlook_read: "Read emails",
+    outlook_send: a("reply_to") ? `Reply${a("to") ? ` to ${a("to")}` : ""}` : `Email to ${a("to")}`,
+    outlook_create_draft: `Draft ${a("to") ? `to ${a("to")}` : "email"}`,
+    outlook_modify: `${(a("change") || "update").replace(/_/g, " ")}: ${a("description") || "emails"}`,
+    outlook_trash: `Delete ${a("description") || "emails"}`,
+    outlook_calendar_create_event: `Add “${a("title")}”`,
+    outlook_calendar_update_event: `Change “${a("current_title")}”`,
+    outlook_calendar_delete_event: `Delete “${a("current_title")}”`,
+    onedrive_list_folder: "Opened a folder",
+    onedrive_create_word_doc: `Create “${a("title")}.docx”`,
+    onedrive_save_text_file: `Save ${a("name") || a("current_name") || "a file"}`,
+    excel_append_rows: `Add rows to “${a("name")}”`,
+    onedrive_rename: `Rename ${a("current_name") || "a file"} to ${a("new_name")}`,
+    onedrive_create_folder: `Create folder “${a("name")}”`,
+    onedrive_move: `Move “${a("name")}” to ${a("folder_name")}`,
+    onedrive_trash: `Delete “${a("name")}”`,
     google_calendar_events: "Checked your calendar",
     google_calendar_create_event: `Add “${a("title")}”`,
     google_calendar_update_event: `Change “${a("current_title")}”`,
@@ -366,6 +428,11 @@ const CHANGE_TEXT: Record<string, string> = {
   mark_read: "Mark as read", mark_unread: "Mark as unread", archive: "Archive", move_to_inbox: "Move to inbox", star: "Star", unstar: "Remove star",
   mark_important: "Mark important", add_label: "Add label", remove_label: "Remove label",
 };
+const OUTLOOK_CHANGE_TEXT: Record<string, string> = {
+  mark_read: "Mark as read", mark_unread: "Mark as unread", archive: "Archive", move_to_inbox: "Move to inbox", flag: "Flag", unflag: "Remove flag",
+  add_category: "Add category", remove_category: "Remove category",
+};
+const count = (ids: string) => ids.split(/[\s,]+/).filter(Boolean).length;
 export function actionDraft(name: string, args: Record<string, unknown>): ActionDraft | null {
   const v = (k: string) => (typeof args[k] === "string" ? (args[k] as string) : typeof args[k] === "number" ? String(args[k]) : "");
   const f = (key: string, label: string, extra: Partial<ActionField> = {}): ActionField => ({ key, label, value: v(key), ...extra });
@@ -391,9 +458,35 @@ export function actionDraft(name: string, args: Record<string, unknown>): Action
     case "google_drive_trash":
       return { title: "Move to Trash?", confirm: "Move to Trash", danger: true, note: `${v("name")} (you can restore it from Drive's Trash for 30 days)`, fields: [] };
     case "gmail_modify":
-      return { title: `${CHANGE_TEXT[v("change")] ?? "Update"}${v("label") ? ` “${v("label")}”` : ""}?`, confirm: CHANGE_TEXT[v("change")] ?? "Apply", note: `${v("description")} (${v("ids").split(/[\s,]+/).filter(Boolean).length} emails)`, fields: [] };
+      return { title: `${CHANGE_TEXT[v("change")] ?? "Update"}${v("label") ? ` “${v("label")}”` : ""}?`, confirm: CHANGE_TEXT[v("change")] ?? "Apply", note: `${v("description")} (${count(v("ids"))} emails)`, fields: [] };
     case "gmail_trash":
-      return { title: "Move these emails to Trash?", confirm: "Move to Trash", danger: true, note: `${v("description")} (${v("ids").split(/[\s,]+/).filter(Boolean).length} emails, recoverable for 30 days)`, fields: [] };
+      return { title: "Move these emails to Trash?", confirm: "Move to Trash", danger: true, note: `${v("description")} (${count(v("ids"))} emails, recoverable for 30 days)`, fields: [] };
+    case "outlook_modify":
+      return { title: `${OUTLOOK_CHANGE_TEXT[v("change")] ?? "Update"}${v("category") ? ` “${v("category")}”` : ""}?`, confirm: OUTLOOK_CHANGE_TEXT[v("change")] ?? "Apply", note: `${v("description")} (${count(v("ids"))} emails)`, fields: [] };
+    case "outlook_trash":
+      return { title: "Delete these emails?", confirm: "Delete", danger: true, note: `${v("description")} (${count(v("ids"))} emails, moved to Deleted Items)`, fields: [] };
+    case "outlook_calendar_create_event":
+      return actionDraft("google_calendar_create_event", args);
+    case "outlook_calendar_update_event":
+      return actionDraft("google_calendar_update_event", args);
+    case "outlook_calendar_delete_event":
+      return actionDraft("google_calendar_delete_event", args);
+    case "onedrive_create_word_doc":
+      return { title: "Save this Word document?", confirm: "Save", note: "Saved as a .docx in your OneDrive", fields: [f("title", "Title"), f("content", "Text", { multiline: true })] };
+    case "onedrive_save_text_file":
+      return v("id")
+        ? { title: "Replace this file's text?", confirm: "Replace", danger: true, note: v("current_name") || v("name"), fields: [f("content", "Text", { multiline: true })] }
+        : { title: "Save this file?", confirm: "Save", fields: [f("name", "Name"), f("content", "Text", { multiline: true })] };
+    case "excel_append_rows":
+      return actionDraft("google_sheets_append_rows", args);
+    case "onedrive_rename":
+      return actionDraft("google_drive_rename", args);
+    case "onedrive_create_folder":
+      return actionDraft("google_drive_create_folder", args);
+    case "onedrive_move":
+      return actionDraft("google_drive_move", args);
+    case "onedrive_trash":
+      return { title: "Delete this file?", confirm: "Delete", danger: true, note: `${v("name")} (you can restore it from the OneDrive recycle bin)`, fields: [] };
     case "google_calendar_create_event":
       return { title: "Add this to your calendar?", confirm: "Add event", fields: [f("title", "Title"), f("start", "Starts", { when: true }), f("end", "Ends", { optional: true, when: true }), f("location", "Where", { optional: true }), ...opt("description", "Notes", { multiline: true })] };
     case "google_calendar_update_event":
