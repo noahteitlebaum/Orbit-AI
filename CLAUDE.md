@@ -1,1 +1,2 @@
 @AGENTS.md
+@docs/ENGINEERING_PROTOCOL.md

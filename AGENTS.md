@@ -1,5 +1,7 @@
 # AGENTS.md — Orbit AI
 
+For Orbit engineering work, follow [docs/ENGINEERING_PROTOCOL.md](docs/ENGINEERING_PROTOCOL.md). Apply its intake, scope, validation, and reporting rules proportionally to the task.
+
 Read this first in every AI session. Also read `docs/PRODUCT_SPEC.md`, `docs/ARCHITECTURE.md`, and `docs/TASKS.md`. If anything here conflicts with a direct instruction from Noah, follow Noah and update this file.
 
 ## What this is
