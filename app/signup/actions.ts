@@ -4,6 +4,7 @@ import { redirect } from "next/navigation";
 import { createClient } from "@/lib/supabase/server";
 import { isAllowedEmail, normalizeEmail } from "@/lib/auth/eligibility";
 import { friendlyAuthError, logAuthError } from "@/lib/auth/errors";
+import { institution } from "@/config/institutions";
 import { passwordProblem } from "@/lib/auth/password";
 import { resendSignupCode, verifyEmailCode } from "@/lib/auth/flows";
 
@@ -17,6 +18,11 @@ export type SignUpState = {
 export async function signUpAction(prev: SignUpState, formData: FormData): Promise<SignUpState> {
   const intent = String(formData.get("intent") ?? "signup");
   const email = normalizeEmail(String(formData.get("email") ?? prev.email ?? ""));
+
+  const school = institution(formData.get("institution"));
+  if (school?.id !== "western") {
+    return { step: "details", email, error: "Select Western University to create an account. Other institutions can join the waitlist." };
+  }
 
   if (intent === "back") return { step: "details", email };
   if (!isAllowedEmail(email)) {
@@ -40,7 +46,7 @@ export async function signUpAction(prev: SignUpState, formData: FormData): Promi
   if (problem) return { step: "details", email, error: problem };
 
   const supabase = await createClient();
-  const { data, error } = await supabase.auth.signUp({ email, password });
+  const { data, error } = await supabase.auth.signUp({ email, password, options: { data: { institution: school.id, institution_name: school.name } } });
   if (error) {
     logAuthError("signUp", error);
     return { step: "details", email, error: friendlyAuthError(error, "send") };

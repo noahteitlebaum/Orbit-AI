@@ -141,4 +141,4 @@ and settle separately; no silent degraded panel or provider substitution. Text-o
 
 ## Shared courses and public landing (Jake, October 17)
 Jake approved a provider-independent Courses workspace. Migration0015 preserves existing project IDs/files/chats while making courses shared. Read docs/COURSE_WORKSPACE.md before editing import/context flows. Extraction is one reserved/settled call, not an Orbit vote; dates remain reviewable, edits and revisions must not overwrite concurrent student changes.
-Signed-out home now shows the public landing. Ontario waitlist interest (0016) is separate from auth and app eligibility; exact verified @uwo.ca remains required for app/model access. Read docs/PUBLIC_LANDING.md. Do not claim university SSO, confirmed pricing, or approved legal/contact details.
+Signed-out home now shows the public landing. Canadian institution waitlist interest (0016), collected at /signup, is separate from auth and app eligibility; exact verified @uwo.ca remains required for app/model access. Read docs/PUBLIC_LANDING.md. Do not claim university SSO, confirmed pricing, or approved legal/contact details.

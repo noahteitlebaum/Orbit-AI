@@ -17,7 +17,7 @@ export default async function LoginPage({ searchParams }: { searchParams: Promis
     <AuthCard
       title="Sign in"
       subtitle="Welcome back. Use your @uwo.ca email and password."
-      footer={<>New to Orbit AI? <TextLink href="/#institutions">Join the waitlist</TextLink></>}
+      footer={<>New to Orbit AI? <TextLink href="/signup">Get started</TextLink></>}
     >
       <LoginForm initialMessage={error ? NOTICES[error] : undefined} />
     </AuthCard>

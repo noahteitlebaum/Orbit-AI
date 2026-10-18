@@ -14,6 +14,7 @@ export function SignUpForm() {
   if (state.step === "verify") {
     return (
       <form action={action} className="flex flex-col gap-4">
+        <input type="hidden" name="institution" value="western" />
         <FormAlert error={state.error} message={state.message} />
         <input type="hidden" name="email" value={state.email} />
         <Field label="Verification code" id="code" required autoComplete="one-time-code" inputMode="numeric"
@@ -35,6 +36,7 @@ export function SignUpForm() {
 
   return (
     <form action={action} className="flex flex-col gap-4">
+      <input type="hidden" name="institution" value="western" />
       <FormAlert error={state.error} message={state.message} />
       <Field label="Western email" id="email" type="email" required autoComplete="email" inputMode="email"
         placeholder="you@uwo.ca" defaultValue={state.email} key={state.email} />
