@@ -11,7 +11,7 @@ export const GITHUB_CLIENT_ID = process.env.NEXT_PUBLIC_GITHUB_CLIENT_ID ?? "";
 export const GITHUB_APP_SLUG = process.env.NEXT_PUBLIC_GITHUB_APP_SLUG ?? "";
 export const githubSignInConfigured = Boolean(GITHUB_CLIENT_ID);
 
-export const GITHUB_LIMITS = { files: 80, fileBytes: 60_000, bundleBytes: 400_000, treeLines: 400 };
+export const GITHUB_LIMITS = { files: 80, fileBytes: 60_000, bundleBytes: 400_000, treeLines: 400, pageLines: 200, maxPageLines: 400, pageChars: 12_000 };
 
 export type RepoRef = { owner: string; repo: string; ref?: string; path?: string };
 export type TreeEntry = { path: string; size: number; sha: string };
@@ -89,6 +89,36 @@ export function bundleRepo(info: Pick<RepoInfo, "owner" | "repo" | "ref" | "comm
     bytes += block.length;
   }
   return parts.join("\n\n") + "\n";
+}
+
+/** A bounded, line-labelled source page. Even a single huge line has a continuation cursor. */
+export function githubFilePage(text: string, options: { start_line?: unknown; end_line?: unknown; start_char?: unknown } = {}): string {
+  const integer = (value: unknown, fallback: number) => {
+    const n = Number(value);
+    return Number.isSafeInteger(n) && n >= 0 ? n : fallback;
+  };
+  const lines = text.replace(/\r\n/g, "\n").split("\n");
+  const start = Math.max(1, integer(options.start_line, 1));
+  if (start > lines.length) return `[No lines at ${start}; this file has ${lines.length} lines.]`;
+  const end = Math.min(lines.length, start + GITHUB_LIMITS.maxPageLines - 1, Math.max(start, integer(options.end_line, start + GITHUB_LIMITS.pageLines - 1)));
+  let room = GITHUB_LIMITS.pageChars - 512;
+  const parts: string[] = [];
+  let last = start;
+  let next = end < lines.length ? { line: end + 1, char: 0 } : null;
+  for (let line = start; line <= end; line++) {
+    const offset = line === start ? Math.min(integer(options.start_char, 0), lines[line - 1].length) : 0;
+    const prefix = `${line}${offset ? ` (char ${offset}+)` : ""}: `;
+    if (room <= prefix.length + 1) { next = { line, char: offset }; break; }
+    const body = lines[line - 1].slice(offset);
+    const kept = body.slice(0, room - prefix.length - 1);
+    parts.push(prefix + kept);
+    room -= prefix.length + kept.length + 1;
+    last = line;
+    if (kept.length < body.length) { next = { line, char: offset + kept.length }; break; }
+  }
+  return [`[Lines ${start}-${last} of ${lines.length}; source excerpt.]`, ...parts,
+    next ? `[More available: call github_read_file with start_line=${next.line}, end_line=${Math.min(lines.length, next.line + GITHUB_LIMITS.pageLines - 1)}, start_char=${next.char}. Read further sections when needed; do not claim to have read omitted code.]` : '[End of file.]',
+  ].join("\n");
 }
 
 // ---------------------------------------------------------------- browser calls

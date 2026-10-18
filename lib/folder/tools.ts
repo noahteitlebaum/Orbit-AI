@@ -101,7 +101,6 @@ export function describeCall(name: string, args: Record<string, unknown>): strin
 export const MAX_TOOL_STEPS = 12;
 export const MAX_CALLS_PER_STEP = 8;
 export const MAX_RESULT_CHARS = 60_000;
-export const MAX_RUN_TOOL_CHARS = 150_000;
 
 export function folderPrompt(folderName: string, stepsLeft: number): string {
   return [

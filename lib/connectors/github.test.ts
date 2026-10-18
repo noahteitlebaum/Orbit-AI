@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { bundleRepo, fileText, isTextPath, loadRepo, parseRepoUrl, suggestFiles, type RepoInfo } from "./github";
+import { bundleRepo, fileText, githubFilePage, GITHUB_LIMITS, isTextPath, loadRepo, parseRepoUrl, suggestFiles, type RepoInfo } from "./github";
 import { exchangeCode, refreshToken } from "./github-oauth";
 
 afterEach(() => {
@@ -136,5 +136,41 @@ describe("GitHub sign-in renewal", () => {
     expect(refreshes).toBe(1);
     expect(auths).toEqual(["Bearer ghu_new", "Bearer ghu_new", "Bearer ghu_new"]);
     expect(gh.githubAuth()).toMatchObject({ token: "ghu_new", refreshToken: "ghr_2", login: "noah" });
+  });
+});
+
+
+describe("paged GitHub source reads", () => {
+  const text = Array.from({ length: 1000 }, (_, i) => `source line ${i + 1}`).join('\n');
+  it("returns a bounded first page and the exact next range", () => {
+    const page = githubFilePage(text);
+    expect(page).toContain('[Lines 1-200 of 1000; source excerpt.]');
+    expect(page).toContain('200: source line 200');
+    expect(page).not.toContain('201: source line 201');
+    expect(page).toContain('start_line=201, end_line=400, start_char=0');
+    expect(page.length).toBeLessThanOrEqual(GITHUB_LIMITS.pageChars);
+  });
+  it("reads requested later lines and caps excessive ranges", () => {
+    expect(githubFilePage(text, {start_line: 500, end_line: 510})).toContain('500: source line 500');
+    expect(githubFilePage(text, {end_line: 999999})).toContain('[Lines 1-400');
+    expect(githubFilePage(text, {start_line: 1001})).toContain('No lines');
+  });
+  it("can read every character of an extremely long line using the returned cursor", () => {
+    const original = 'abcdef'.repeat(8000);
+    let cursor = 0, recovered = '', page = '';
+    do {
+      page = githubFilePage(original, { start_line: 1, start_char: cursor });
+      expect(page.length).toBeLessThanOrEqual(GITHUB_LIMITS.pageChars);
+      recovered += /^1(?: \(char \d+\+\))?: (.*)$/m.exec(page)![1];
+      const next = /start_char=(\d+)/.exec(page);
+      if (!next) break;
+      expect(Number(next[1])).toBeGreaterThan(cursor);
+      cursor = Number(next[1]);
+    } while (cursor < original.length);
+    expect(recovered).toBe(original);
+    expect(page).toContain('[End of file.]');
+  });
+  it("normalizes CRLF and handles invalid paging input", () => {
+    expect(githubFilePage('a\r\nb', {start_line: -20, end_line: 'invalid'})).toContain('1: a\n2: b');
   });
 });

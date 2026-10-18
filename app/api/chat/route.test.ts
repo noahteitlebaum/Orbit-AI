@@ -405,6 +405,71 @@ describe("plugins and skills", () => {
   });
 });
 
+describe("automatic GitHub context handling", () => {
+  it("continues when optional tool activity storage is unavailable", async () => {
+    state.live = true;
+    const call = {id: "g1", name: "github_read_file", args: {repo: "synthetic/demo", path: "src/one.ts"}};
+    state.events = [{toolCall: call}];
+    const first = await readEvents(await POST(req({provider: "anthropic", modelId: "anthropic-default", content: "Read the file.", plugins: ["github"]})));
+    const from = state.fake!.client.from.bind(state.fake!.client);
+    vi.spyOn(state.fake!.client, "from").mockImplementation((table) => {
+      const query = from(table);
+      const select = query.select.bind(query);
+      vi.spyOn(query, "select").mockImplementation((columns?: string) => {
+        if (table === "messages" && columns?.includes("tool_log")) {
+          expect(columns).toBe("tool_log"); // Optional column must not be in the continuation-validation query.
+          vi.spyOn(query, "maybeSingle").mockResolvedValue({data: null, error: {code: "42703"}} as never);
+        }
+        return select();
+      });
+      return query;
+    });
+    state.events = [{delta: "Here is the answer."}];
+    const steps = [{text: "", calls: [call], results: [{id: call.id, output: "A short file.", status: "ok"}]}];
+    const response = await POST(req({provider: "anthropic", modelId: "anthropic-default", conversationId: first[0].conversationId, plugins: ["github"], run: {replyId: first.at(-1).replyId, steps}}));
+    expect(response.status).toBe(200);
+    expect((await readEvents(response)).at(-1)).toMatchObject({t: "done", status: "complete"});
+  });
+
+  it("retains the source-coverage disclosure when a later round fits without compaction", async () => {
+    state.live = true;
+    const call = {id: "g1", name: "github_read_file", args: {repo: "synthetic/demo", path: "src/one.ts"}};
+    state.events = [{toolCall: call}];
+    const first = await readEvents(await POST(req({provider: "anthropic", modelId: "anthropic-default", content: "Read the next section.", plugins: ["github"]})));
+    const reply = state.fake!.db.messages.find((m) => m.id === first.at(-1).replyId)!;
+    reply.tool_log = [{name: "github_read_file", label: "Read previous section", status: "ok", contextLimited: true}];
+    state.events = [{delta: "Here is the answer."}];
+    const steps = [{text: "", calls: [call], results: [{id: call.id, output: "A short section.", status: "ok"}]}];
+    const events = await readEvents(await POST(req({provider: "anthropic", modelId: "anthropic-default", conversationId: first[0].conversationId, plugins: ["github"], run: {replyId: reply.id, steps}})));
+    expect(events[0]).toMatchObject({toolContextCompacted: true});
+    expect(reply.tool_log).toEqual([expect.objectContaining({contextLimited: true})]);
+  });
+
+  it.each([2, 8])("continues after %i large results without asking the user to split the prompt", async (count) => {
+    state.live = true;
+    const question = "Review authentication and repository integration. " + "Detailed requirements. ".repeat(1300);
+    const calls = Array.from({length: count}, (_, i) => ({id: `g${i}`, name: "github_read_file", args: {repo: "synthetic/demo", path: `src/${i}.ts`}}));
+    state.events = calls.map((toolCall) => ({toolCall}));
+    const first = await readEvents(await POST(req({provider: "anthropic", modelId: "anthropic-default", content: question, plugins: ["github"]})));
+    expect(first.at(-1)).toMatchObject({t: "tool_calls"});
+    const steps = [{text: "Reading files. ".repeat(2000), calls, results: calls.map((call) => ({id: call.id, output: 'const x = "quoted";\n'.repeat(2500), status: "ok"}))}];
+    state.events = [{delta: "Here are the findings."}, {usage: {input: 1000, output: 100, reasoning: 0, cached: 0}}];
+    vi.mocked(budget.reserve).mockClear();
+    const response = await POST(req({provider: "anthropic", modelId: "anthropic-default", conversationId: first[0].conversationId, plugins: ["github"], run: {replyId: first.at(-1).replyId, steps}}));
+    expect(response.status).toBe(200);
+    const events = await readEvents(response);
+    expect(events[0]).toMatchObject({t: "meta", toolContextCompacted: true});
+    expect(events.at(-1)).toMatchObject({t: "done", status: "complete"});
+    expect(state.lastArgs!.history.some((turn) => turn.content === question.trim())).toBe(true);
+    const results = state.lastArgs!.history.flatMap((turn) => turn.toolResults ?? []) as {id: string; output: string}[];
+    expect(results.map((r) => r.id)).toEqual(calls.map((c) => c.id));
+    expect(results.every((r) => r.output.includes('source excerpt'))).toBe(true);
+    const reservation = vi.mocked(budget.reserve).mock.calls.find((call) => call[5]?.operation === "chat")!;
+    expect(reservation[5]!.inputEstimate).toBeLessThanOrEqual(24000);
+    expect(state.fake!.db.messages.find((m) => m.role === "assistant")!.tool_log).toEqual(expect.arrayContaining([expect.objectContaining({contextLimited: true})]));
+  });
+});
+
 describe("profile and memory", () => {
   const profile = { user_id: "user-1", display_name: "Noah", program: "BSc CS", level: "2nd year", style: "concise", length: "", about: "", instructions: "Use SI units.", memory_enabled: false };
   const ask = () => POST(req({ provider: "anthropic", modelId: "anthropic-default", content: "I'm taking STATS 2244, remember that" }));

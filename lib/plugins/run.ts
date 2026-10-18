@@ -1,7 +1,7 @@
 // Browser: runs a plugin tool the AI asked for, with the student's own sign-in, and returns text for the model.
 // Read-only calls, plus gmail_send, which the chat only runs after the student clicks Send. If the student isn't signed in, it says so ({ connect }) so the chat can show a Connect button.
 import {
-  fileText, GitHubError, githubToken, listIssues, loadRepo, myRepos, parseRepoUrl, readIssue, recentCommits, searchCode, searchRepos, isTextPath,
+  fileText, githubFilePage, GitHubError, githubToken, listIssues, loadRepo, myRepos, parseRepoUrl, readIssue, recentCommits, searchCode, searchRepos, isTextPath,
 } from "@/lib/connectors/github";
 import { googleToken, googleTokenCached } from "@/lib/connectors/google-drive";
 import { googleEvents, MAIL_LIMITS, sendGmail, draftGmail, modifyGmail, trashGmail, createGoogleEvent, updateGoogleEvent, deleteGoogleEvent, GMAIL_CHANGES, type GmailChange, outlookEvents, readGmail, readOutlook, searchGmail, searchOutlook, type CalEvent, type MailFull, type MailSummary } from "@/lib/connectors/mail-calendar";
@@ -107,7 +107,7 @@ async function call(name: string, a: Record<string, unknown>): Promise<string> {
       if (!path) throw new ConnectorError("Which file? Give its path.");
       const branch = str(a.ref);
       const text = await fileText({ owner: ref.owner, repo: ref.repo, commit: branch, private: false }, path, token);
-      return `${ref.owner}/${ref.repo}/${path}${branch ? ` @ ${branch}` : ""}:\n\n${text.slice(0, 60_000)}${text.length > 60_000 ? "\n[cut off]" : ""}`;
+      return `${ref.owner}/${ref.repo}/${path}${branch ? ` @ ${branch}` : ""}:\n\n${githubFilePage(text, a)}`;
     }
     case "github_search_code": {
       const repo = str(a.repo) ? `${repoArg(a.repo).owner}/${repoArg(a.repo).repo}` : undefined;

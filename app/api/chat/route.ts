@@ -1,5 +1,6 @@
 import { courseContext } from "@/lib/courses/context";
 import { RESPONSE_QUALITY_VERSION } from "@/config/quality";
+import { fitToolContext } from "@/lib/chat/tool-context";
 import { CONTEXT } from "@/config/context";
 import { trackEvent } from "@/lib/analytics/events";
 import { retrieveRelevant } from "@/lib/chat/retrieval";
@@ -21,7 +22,7 @@ import { CODE_TOOLS, codePrompt } from "@/lib/code/tools";
 import { isPluginId, pluginPrompt, pluginTools, type PluginId } from "@/lib/plugins/catalog";
 import { skillsPrompt } from "@/lib/plugins/skills";
 import { loadPersonal, relevantMemories, parseRemember, personalPrompt, saveMemories, type Memory } from "@/lib/profile/personal";
-import { parseSteps, stepTurns, toolLog, type Step } from "@/lib/folder/run";
+import { parseSteps, toolLog, type Step } from "@/lib/folder/run";
 
 // POST /api/chat — auth → ownership → gates → context (+ course material, images, summary) → reserve → stream → reconcile → save.
 // Body: { provider, modelId, content, conversationId?, projectId?, retry?, edit? (with retry: replace the last question), attachmentIds?, mode?, courseOnly?, folder?, run? }
@@ -120,6 +121,7 @@ export async function POST(request: Request): Promise<Response> {
 
   // ---- the student's message (or, on retry, drop the failed reply and reuse the last question)
   let userMessageId: string;
+  let toolContextWasCompacted = false;
   let priorText = ""; // reply text from earlier rounds of a tool run
   if (run) {
     const { data: msgs } = await supabase.from("messages").select("id, role, seq, content, model_id").eq("conversation_id", conversation.id).order("seq");
@@ -130,6 +132,9 @@ export async function POST(request: Request): Promise<Response> {
     if (!reply || reply.id !== run.replyId || reply.role !== "assistant" || !lastUser || (reply.model_id && reply.model_id!==model.id)) return json({ error: "bad_request" }, 400);
     userMessageId = lastUser.id;
     priorText = reply.content ?? "";
+    // Optional activity storage (migration 0004): its absence must not break a valid continuation.
+    const { data: previousActivity } = await supabase.from("messages").select("tool_log").eq("id", reply.id).maybeSingle();
+    toolContextWasCompacted = Array.isArray(previousActivity?.tool_log) && previousActivity.tool_log.some((entry: { contextLimited?: boolean } | null) => entry?.contextLimited === true);
   } else if (retry) {
     const { data: msgs } = await supabase.from("messages").select("id, role, seq").eq("conversation_id", conversation.id).eq("kind", "text").order("seq");
     const lastUser = [...(msgs ?? [])].reverse().find((m) => m.role === "user");
@@ -279,15 +284,23 @@ export async function POST(request: Request): Promise<Response> {
   const skillText = skillsPrompt(body.skills);
   const offered = [...(codeOn ? CODE_TOOLS : []), ...(folderName ? FOLDER_TOOLS : []), ...pluginTools(pluginIds)];
   const tools = offered.length && stepsUsed < MAX_TOOL_STEPS && !voice ? offered : undefined;
-  const runTurns = run ? stepTurns(run.steps) : [];
-  const runTokens = runTurns.reduce((n, t) => n + estimateTokens(t.content + JSON.stringify(t.toolCalls ?? t.toolResults ?? "")), 0);
   const folderText = [
     codeOn && tools ? codePrompt(material.dataFiles) : "",
     folderName && !voice ? folderPrompt(folderName, MAX_TOOL_STEPS - stepsUsed) : "",
     pluginIds.length && tools ? pluginPrompt(pluginIds, Array.isArray(body.mentions) ? body.mentions.filter((m): m is PluginId => isPluginId(m) && pluginIds.includes(m)) : []) : "",
     skillText,
   ].filter(Boolean).join("\n\n");
-  const baseTokens = estimateTokens(systemPrompt(promptBase) + folderText) + imageCount * IMAGE_TOKENS + material.visualTokens + runTokens + (tools ? estimateTokens(JSON.stringify(tools)) + 400 : 0);
+  const inputCeiling = Math.min(model.contextTokens - model.maxOutputTokens, CONTEXT.maximumInputTokens);
+  const fixedTokens = estimateTokens([systemPrompt(promptBase), folderText].filter(Boolean).join("\n\n")) + imageCount * IMAGE_TOKENS + material.visualTokens + (tools ? estimateTokens(JSON.stringify(tools)) + 400 : 0);
+  // Tool evidence shares the same allowance as the question, instructions, summary and history.
+  // Always protect the newest question; large tool results are excerpted automatically before history selection.
+  const toolBudget = Math.max(0, Math.min(CONTEXT.toolInputTokens, inputCeiling - fixedTokens - estimateTokens(question) - SUMMARY_TOKENS - CONTEXT.retrievalTokens - CONTEXT.toolSafetyTokens));
+  const toolContext = fitToolContext(run?.steps ?? [], toolBudget);
+  if (!toolContext) return json({ error: "context_too_large", conversationId: conversation.id }, 413);
+  const toolContextCompacted = toolContextWasCompacted || toolContext.compacted;
+  const runTurns = toolContext.turns;
+  const runTokens = toolContext.tokens;
+  const baseTokens = fixedTokens + runTokens;
   const contextTarget = economicInputBudget(history, baseTokens + SUMMARY_TOKENS + CONTEXT.retrievalTokens,
     model.contextTokens - model.maxOutputTokens, Boolean(tools || largeMaterialTask && material.hasFiles || material.visualTokens));
   const ctx = buildEconomicContext(history, Math.max(0, contextTarget - baseTokens - SUMMARY_TOKENS - CONTEXT.retrievalTokens));
@@ -416,7 +429,7 @@ export async function POST(request: Request): Promise<Response> {
 
       send({
         t: "meta", conversationId: conversation.id, title: conversation.title, userMessageId, replyId, modelId: model.id,
-        dropped: ctx.dropped, summaryIncomplete, summarized: Boolean(ctx.dropped && summary), mode: conversation.mode, courseOnly: conversation.course_only,
+        dropped: ctx.dropped, toolContextCompacted, summaryIncomplete, summarized: Boolean(ctx.dropped && summary), mode: conversation.mode, courseOnly: conversation.course_only,
         attachmentIds: linked,
       });
 
@@ -473,7 +486,7 @@ export async function POST(request: Request): Promise<Response> {
         remembered = await saveMemories(supabase, user.id, conversation.id, personal.memories, remember.saved);
       }
       // File activity shown under the reply (needs migration 0004; skipped quietly if it hasn't been run).
-      if (run) await supabase.from("messages").update({ tool_log: toolLog(run.steps) }).eq("id", replyId);
+      if (run) await supabase.from("messages").update({ tool_log: toolLog(run.steps, toolContextCompacted) }).eq("id", replyId);
 
       if (live) {
         if (usage) await settle(requestId, "settled", costMicros(model, usage), usage, failure?.code, {latencyMs:Date.now()-startedAt,finishReason:finish,qualityVersion:RESPONSE_QUALITY_VERSION});

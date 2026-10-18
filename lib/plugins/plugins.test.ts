@@ -70,7 +70,7 @@ describe("running plugin tools in the browser", () => {
     expect(o.ok && o.output).not.toContain("node_modules");
     expect(o.ok && o.output).toContain("# Demo readme");
     const f = await runPluginTool("github_read_file", { repo: "octo/demo", path: "src/a.py" });
-    expect(f).toEqual({ ok: true, output: "octo/demo/src/a.py:\n\nprint(1)" });
+    expect(f).toEqual({ ok: true, output: "octo/demo/src/a.py:\n\n[Lines 1-1 of 1; source excerpt.]\n1: print(1)\n[End of file.]" });
     expect(urls.at(-1)).toBe("https://raw.githubusercontent.com/octo/demo/HEAD/src/a.py");
   });
   it("asks for sign-in where the app needs it", async () => {

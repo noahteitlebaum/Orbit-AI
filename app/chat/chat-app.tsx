@@ -58,6 +58,7 @@ type Message = {
   imageUrl?: string | null;
   modelId?: string;
   finishReason?: string;
+  toolContextCompacted?: boolean;
   status: "complete" | "partial" | "streaming" | "error";
   error?: string; // friendly error text for a failed reply
   attachments?: { id: string; name: string; kind: string; status: string; error?: string | null; project_id?: string | null }[];
@@ -362,7 +363,7 @@ export function ChatApp({ email, userId, onCourses, courseLaunch }: { email: str
       if (!res || handleAuth(res) || !res.ok) return;
       const out = (await res.json()) as { messages: Message[]; mode?: StudyMode; courseOnly?: boolean; summarized?: boolean; summaryIncomplete?: boolean; quiz?: QuizState | null };
       const withActivity = out.messages.map((m) =>
-        m.toolLog?.length ? { ...m, activity: m.toolLog.map((t, i) => ({ id: `${m.id}-${i}`, name: t.name, label: t.label, status: t.status, code: t.code, stdout: t.output, links: t.links })) } : m,
+        m.toolLog?.length ? { ...m, toolContextCompacted: m.toolLog.some(t => t.contextLimited), activity: m.toolLog.map((t, i) => ({ id: `${m.id}-${i}`, name: t.name, label: t.label, status: t.status, code: t.code, stdout: t.output, links: t.links })) } : m,
       );
       setMessages((prev) => (prev[id] ? prev : { ...prev, [id]: withActivity }));
       setSettings((prev) => (prev[id] ? prev : { ...prev, [id]: { mode: out.mode ?? "chat", courseOnly: Boolean(out.courseOnly), summarized: out.summarized, summaryIncomplete:out.summaryIncomplete, quiz: out.quiz } }));
@@ -711,6 +712,7 @@ export function ChatApp({ email, userId, onCourses, courseLaunch }: { email: str
                 adoptConversation(ev.conversationId, ev.title, key);
                 currentKey = convId = ev.conversationId;
               }
+              if (ev.toolContextCompacted) patchReply((m) => ({ ...m, toolContextCompacted: true }));
               setDropped((prev) => ({ ...prev, [ev.conversationId]: ev.dropped }));
               setSettings((prev)=>({...prev,[ev.conversationId]:{...(prev[ev.conversationId]??chatSettings),summaryIncomplete:Boolean(ev.summaryIncomplete)}}));
               if (ev.summarized) setSettings((prev) => ({ ...prev, [ev.conversationId]: { ...(prev[ev.conversationId] ?? chatSettings), summarized: true } }));
@@ -1589,6 +1591,7 @@ export function ChatApp({ email, userId, onCourses, courseLaunch }: { email: str
                         {m.kind === "text" && m.sources && m.sources.length > 0 && (
                           <SourceList sources={m.sources} />
                         )}
+                        {m.toolContextCompacted && <p className="mt-2 text-xs text-ink-subtle">Large source results were shortened for this answer. The AI can read further sections as needed.</p>}
                         {m.activity && m.status !== "streaming" && <PluginSources items={m.activity} />}
                         {m.remembered && m.remembered.length > 0 && (
                           <p className="mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-ink-subtle">

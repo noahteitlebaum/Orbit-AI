@@ -3,6 +3,8 @@ export const CONTEXT = {
   ordinaryInputTokens: 8_000,
   complexInputTokens: 16_000,
   maximumInputTokens: 24_000,
+  toolInputTokens: 10_000, // shared evidence allowance; shrinks automatically for larger prompts
+  toolSafetyTokens: 256,
   recentExchanges: 5,
   summaryTokens: 1_500,
   retrievalTokens: 1_200,
