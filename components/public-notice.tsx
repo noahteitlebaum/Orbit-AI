@@ -1,0 +1,7 @@
+import Link from 'next/link';
+import {Wordmark} from './brand';
+import {PUBLIC_SITE} from '@/config/public-site';
+export function PublicNotice({kind}:{kind:'Privacy'|'Terms'|'Contact'}){
+ const external=kind==='Privacy'?PUBLIC_SITE.privacyUrl:kind==='Terms'?PUBLIC_SITE.termsUrl:'';
+ return <main className="mx-auto w-full max-w-2xl px-6 py-16"><Link href="/" aria-label="Orbit home"><Wordmark/></Link><h1 className="mt-12 text-4xl font-medium">{kind}</h1>{external?<p className="mt-6"><a className="text-brand underline" href={external}>Read our {kind.toLowerCase()}</a></p>:kind==='Contact'&&PUBLIC_SITE.contactEmail?<a className="mt-6 block text-brand underline" href={`mailto:${PUBLIC_SITE.contactEmail}`}>{PUBLIC_SITE.contactEmail}</a>:<><p className="mt-6 text-ink-muted">{kind==='Contact'?'The public support address is being finalized. Please check back before sharing sensitive information.':`Our full ${kind.toLowerCase()} document is being finalized. This page is a status notice, not an approved legal policy.`}</p>{kind==='Privacy'&&<p className="mt-4 leading-7 text-ink-muted">The waitlist form stores your email, selected school, consent version, and join date to manage access invitations. It does not create an account or verify enrolment. A temporary hashed network identifier limits abuse; conversation text is not collected by this form. You can choose not to submit while the full policy and contact channel are pending.</p>}</>}<Link href="/" className="mt-8 inline-block text-brand underline">Back to Orbit</Link></main>;
+}

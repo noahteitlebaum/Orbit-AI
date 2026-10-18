@@ -348,3 +348,13 @@ a.md-cite:hover { color: var(--ink); }
 .orbit-shimmer { background: linear-gradient(90deg, var(--ink-muted) 0%, var(--ink) 50%, var(--ink-muted) 100%); background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent; animation: orbit-shimmer 1.6s linear infinite; }
 @keyframes orbit-shimmer { from { background-position: 100% 0; } to { background-position: -100% 0; } }
 @media (prefers-reduced-motion: reduce) { .orbit-shimmer { animation: none; color: var(--ink-muted); background: none; } }
+
+/* Public site uses the existing Orbit Night / Day tokens and reduced-motion preference. */
+.orbit-landing :is(button,a,input,select):focus-visible { outline: 2px solid var(--brand); outline-offset: 4px; }
+.orbit-landing .institution-logo { padding: 8px; border-radius: 6px; background: var(--surface-300); }
+@media (prefers-reduced-motion: no-preference) { .orbit-landing button { transition: background-color .18s ease, border-color .18s ease; } }
+
+.orbit-landing .institution-logo[data-logo-surface="dark"] { background: light-dark(var(--ink),var(--surface-300)); }
+.orbit-landing .institution-logo[data-logo-surface="light"] { background: light-dark(var(--surface-100),var(--ink)); }
+
+.orbit-landing .landing-hero > svg { opacity: .12; }

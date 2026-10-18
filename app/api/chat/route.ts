@@ -1,3 +1,4 @@
+import { courseContext } from "@/lib/courses/context";
 import { RESPONSE_QUALITY_VERSION } from "@/config/quality";
 import { CONTEXT } from "@/config/context";
 import { trackEvent } from "@/lib/analytics/events";
@@ -173,6 +174,7 @@ export async function POST(request: Request): Promise<Response> {
   if (conversation.project_id) {
     const { data } = await supabase.from("projects").select("name, instructions").eq("id", conversation.project_id).maybeSingle();
     project = data;
+    if(project){const context=await courseContext(supabase,user.id,conversation.project_id,content,false);project.instructions += "\n"+context.block;}
   }
   const attachmentImageCandidates = [...new Set(rows.flatMap(r => r.attachment_ids ?? []))];
   const { data: imageFiles } = attachmentImageCandidates.length

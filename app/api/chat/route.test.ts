@@ -629,7 +629,7 @@ it("keeps the shared image cap when attachment images precede the recent exchang
   state.live = true;
   const conversationId = "66666666-6666-4666-8666-666666666666";
   state.fake!.db.conversations.push({id:conversationId,user_id:"user-1",provider:"anthropic",title:"Images",project_id:"course",mode:"chat",course_only:false,summary:null,summary_upto:null});
-  state.fake!.db.projects.push({id:"course",name:"Biology",instructions:""});
+  state.fake!.db.projects.push({id:"course",user_id:"user-1",name:"Biology",instructions:""});
   const attachedIds = [];
   for (let i=0;i<8;i++) {
     const id=crypto.randomUUID(), path=`u/image-${i}.png`;

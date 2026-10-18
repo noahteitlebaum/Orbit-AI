@@ -116,7 +116,7 @@ const STARTERS: { label: string; icon: string; text: string; mode?: StudyMode; u
   { label: "Plan my week", icon: "🗓️", text: "Help me plan my study week. My deadlines and exams are: " },
 ];
 
-export function ChatApp({ email, userId }: { email: string; userId: string }) {
+export function ChatApp({ email, userId, onCourses, courseLaunch }: { email: string; userId: string; onCourses?: () => void; courseLaunch?: (import("@/lib/courses/types").CourseLaunch & {key:number}) | null }) {
   const router = useRouter();
   const [provider, setProvider] = useState<ProviderId>("openai");
   const [orbitMode, setOrbitMode] = useState(false);
@@ -333,6 +333,25 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
       setActiveIds((prev) => (prev[provider] ? prev : { ...prev, [provider]: list[0]?.id ?? null }));
     })();
   }, [ready, provider, orbitMode, convs, handleAuth]);
+
+  useEffect(() => {
+    if (!courseLaunch || !ready) return;
+    let cancelled=false;
+    if (courseLaunch.provider === "orbit") {
+      setOrbitMode(true); // eslint-disable-line react-hooks/set-state-in-effect
+      return;
+    }
+    const p=courseLaunch.provider as ProviderId;
+    if (!PROVIDERS.includes(p)) return;
+    Promise.all([fetch(`/api/conversations?provider=${p}`).then(r=>r.json()),fetch(`/api/projects?provider=${p}`).then(r=>r.json())]).then(([c,projects])=>{
+      if(cancelled)return;
+      setConvs(prev=>({...prev,[p]:c.conversations??[]}));setProjects(prev=>({...prev,[p]:projects.projects??[]}));
+      setProvider(p);setOrbitMode(false);setPage("chat");setImageMode(false);setPending([]);
+      setProjectFilter(prev=>({...prev,[p]:courseLaunch.course.id}));setActiveIds(prev=>({...prev,[p]:courseLaunch.conversationId??null}));
+      setInput(courseLaunch.prompt+(courseLaunch.item?`\n\nAssignment: ${courseLaunch.item.title}\nDue: ${courseLaunch.item.due??"unconfirmed"}\n${courseLaunch.item.details}`:""));
+    }).catch(()=>alertLine("Could not open the course chat. Please try again."));
+    return()=>{cancelled=true;};
+  },[courseLaunch,ready]);
 
   // Load an opened chat's messages once.
   useEffect(() => {
@@ -1192,7 +1211,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
   const remaining = usage?.live ? usage.allowance - usage.spent - usage.reserved : 0;
   const usedPct = usage?.live && usage.allowance > 0 ? Math.min(100, ((usage.spent + usage.reserved) / usage.allowance) * 100) : 0;
 
-  if (orbitMode) return <OrbitChat onSelectProvider={(p) => { setOrbitMode(false); pickProvider(p); }} />;
+  if (orbitMode) return <OrbitChat onCourses={onCourses} courseLaunch={courseLaunch?.provider === "orbit" ? courseLaunch : null} onSelectProvider={(p) => { setOrbitMode(false); pickProvider(p); }} />;
 
   return (
     <div data-theme={provider} className="flex h-dvh bg-surface-000 font-ui text-ink">
@@ -1244,6 +1263,7 @@ export function ChatApp({ email, userId }: { email: string; userId: string }) {
             Search chats
             <kbd className="ml-auto hidden font-sans text-xs text-ink-subtle md:inline">{isMac ? "⌘K" : "Ctrl K"}</kbd>
           </button>
+          <button onClick={onCourses} disabled={busy} className="flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-[15px] hover:bg-surface-200">Courses workspace ↗</button>
           <button onClick={() => openPlugins("plugins")} aria-current={page === "plugins" ? "page" : undefined}
             className={`flex w-full items-center gap-3 px-3 py-2.5 text-left text-[15px] transition ${page === "plugins" ? "bg-surface-300" : "hover:bg-surface-200"} ${theme.itemClass}`}>
             <svg viewBox="0 0 20 20" width="18" height="18" aria-hidden>{[[3, 3], [11, 3], [3, 11], [11, 11]].map(([x, y]) => <rect key={`${x}${y}`} x={x} y={y} width="6" height="6" rx="1.6" fill="none" stroke="currentColor" strokeWidth="1.5" />)}</svg>

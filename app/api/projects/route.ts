@@ -12,7 +12,7 @@ export async function GET(request: Request) {
   const { data, error } = await auth.supabase
     .from("projects")
     .select("id, name, instructions, updated_at")
-    .eq("provider", provider)
+    .eq("user_id", auth.user.id)
     .order("updated_at", { ascending: false });
   if (error) return dbError(error, "load_failed");
   return json({ projects: data ?? [] });
@@ -28,7 +28,7 @@ export async function POST(request: Request) {
   if (!name) return json({ error: "bad_request" }, 400);
   const { data, error } = await auth.supabase
     .from("projects")
-    .insert({ user_id: auth.user.id, provider: body.provider, name, instructions })
+    .insert({ user_id: auth.user.id, provider: null, name, instructions })
     .select("id, name, instructions, updated_at")
     .single();
   if (error) return dbError(error, "save_failed");

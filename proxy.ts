@@ -4,6 +4,7 @@ import { NextResponse, type NextRequest } from "next/server";
 // Runs before every page request: keeps the login session fresh and
 // sends signed-out visitors to /login. Real access checks still happen on the server (lib/auth/session.ts).
 export async function proxy(request: NextRequest) {
+  if (["/privacy", "/terms", "/contact", "/api/waitlist"].includes(request.nextUrl.pathname) || (request.nextUrl.pathname === "/" && !process.env.NEXT_PUBLIC_SUPABASE_URL)) return NextResponse.next();
   let response = NextResponse.next({ request });
 
   const supabase = createServerClient(
@@ -42,7 +43,7 @@ export async function proxy(request: NextRequest) {
 }
 
 function isPublicPath(path: string) {
-  return ["/login", "/signup", "/reset", "/auth/"].some((p) => path === p || path.startsWith(p.endsWith("/") ? p : `${p}/`));
+  return path === "/" || ["/login", "/signup", "/reset", "/auth/"].some((p) => path === p || path.startsWith(p.endsWith("/") ? p : `${p}/`));
 }
 
 export const config = {

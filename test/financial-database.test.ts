@@ -120,3 +120,43 @@ it("atomically blocks AI-memory inserts after opt-out while allowing manual note
     await expect(db.exec(`insert into public.memories(user_id,source,content) values('${V}','ai','Cross user')`)).rejects.toThrow(/row-level security/);
   } finally { await db.exec('reset role'); }
 });
+
+describe('course workspace SQL and ownership',()=>{
+ const F='aaaaaaaa-1111-4111-8111-111111111111',F2='aaaaaaaa-2222-4222-8222-222222222222';
+ const d={name:'Synthetic Biology',term:'Fall 2026',instructor:'',schedule:'',officeHours:'',items:[]};
+ it('atomically claims imports and protects claims from student calls',async()=>{
+  await db.exec(`insert into public.files(id,user_id,name,mime,size_bytes,storage_path,kind) values('${F}','${U}','synthetic.txt','text/plain',12,'${U}/${F}/synthetic.txt','document'),('${F2}','${V}','private.txt','text/plain',12,'${V}/${F2}/private.txt','document');`);
+  expect((await db.query<{ok:boolean}>(`select claim_syllabus($1,$2,$3) ok`,[F,U,C])).rows[0].ok).toBe(true);
+  expect((await db.query<{ok:boolean}>(`select claim_syllabus($1,$2,$3) ok`,[F,U,F2])).rows[0].ok).toBe(false);
+  expect((await db.query<{ok:boolean}>(`select claim_syllabus($1,$2,$3) ok`,[F2,U,C])).rows[0].ok).toBe(false);
+  await db.exec(`set role authenticated; select set_config('app.user_id','${U}',false);`);
+  await expect(db.query('select claim_syllabus($1,$2,$3)',[F,U,C])).rejects.toThrow(/permission denied/);
+  await db.exec('reset role');
+ });
+ it('confirms once, keeps cross-provider chats attached, and denies another owner',async()=>{
+  await db.exec(`set role authenticated; select set_config('app.user_id','${U}',false);`);
+  await db.query(`insert into syllabus_drafts(file_id,user_id,draft) values($1,$2,$3)`,[F,U,JSON.stringify(d)]);
+  const result=await db.query<{id:string}>('select confirm_syllabus($1,$2) id',[F,JSON.stringify(d)]);const id=result.rows[0].id;
+  expect((await db.query<{id:string}>('select confirm_syllabus($1,$2) id',[F,JSON.stringify(d)])).rows[0].id).toBe(id);
+  await db.query(`insert into conversations(user_id,provider,model_id,project_id) values($1,'anthropic','anthropic-default',$2)`,[U,id]);
+  expect((await db.query('select * from files where project_id=$1',[id])).rows).toHaveLength(1);
+  await expect(db.query('update projects set syllabus_id=$1 where id=$2',[F2,id])).rejects.toThrow(/syllabus_owner_mismatch/);
+  await db.exec(`select set_config('app.user_id','${V}',false);`);
+  expect((await db.query('select * from projects where id=$1',[id])).rows).toHaveLength(0);
+  await expect(db.query('select confirm_syllabus($1,$2)',[F,JSON.stringify(d)])).rejects.toThrow(/draft_not_found/);
+  await db.exec('reset role');
+ });
+});
+
+describe('public waitlist isolation',()=>{
+ it('deduplicates emails, limits attempts, and keeps interest private from users',async()=>{
+  for(let n=0;n<8;n++)expect((await db.query<{ok:boolean}>(`select join_waitlist('synthetic@example.ca','University of Waterloo','synthetic-bucket') ok`)).rows[0].ok).toBe(true);
+  expect((await db.query<{ok:boolean}>(`select join_waitlist('new@example.ca','Western University','synthetic-bucket') ok`)).rows[0].ok).toBe(false);
+  expect((await db.query(`select * from waitlist_interest where email='synthetic@example.ca'`)).rows).toHaveLength(1);
+  await db.exec(`set role authenticated; select set_config('app.user_id','${U}',false);`);
+  // Test bootstrap grants table access; RLS still makes every entry invisible.
+  expect((await db.query('select * from waitlist_interest')).rows).toHaveLength(0);
+  await expect(db.exec(`select join_waitlist('attack@example.ca','Western University','other')`)).rejects.toThrow(/permission denied/);
+  await db.exec('reset role');
+ });
+});

@@ -1,0 +1,17 @@
+# Course workspace V1 — October 17, 2026
+
+Approved interface: a persistent Courses destination beside chat, My week across courses, and Overview / Assignments / Notes / Study / Syllabus within a course. Existing chat and workspace components stay mounted when switching destinations. No model call runs merely for navigation.
+
+Migration 0015 makes existing projects shared across providers without changing course IDs or moving/deleting files or conversations. Existing per-provider duplicates remain separate; we never merge them by name. New course metadata contains editable date-only assignments, exams, and topics, with stable item IDs/status and source chunk IDs. The private original syllabus stays available. Class notes must be uploaded; syllabus topics do not fabricate notes.
+
+Syllabus upload uses the existing file pipeline, then one explicit, budgeted extraction (`config/courses.ts`, operation `syllabus`). The model is named/configured in code and its ordinary API key is server-only. Full text exceeding the 8k estimated input cap or containing visual/unreadable pages is rejected without partial extraction. A service-only atomic file lease prevents concurrent extraction; saved drafts are reused. Every dispatched call settles actual usage or conservatively marks unknown cost uncertain. Invalid/incomplete output never creates a course. No automatic paid retries or embeddings.
+
+Students review all extracted metadata, source evidence, deadlines and weights before confirming. The atomic confirmation attaches the syllabus and creates/updates the course once. Revised syllabi show a review against current values; matching active tasks propose new fields while retaining IDs/status, completed and unmatched tasks are retained. Both the initial client version and final database version are checked, preventing stale imports or reviews from overwriting work. No implicit year/timezone inference; time/timezone text stays in requirements.
+
+Ask AI opens an editable, unsent prompt. Students explicitly choose Orbit or a provider. Owner-scoped course references and relevant text passages are bounded before entering model context. Generic deadline/planning questions include unfinished tasks. Orbit discloses selected course text going to all four providers. Text passages only in Orbit; direct images/files/tools remain outside Orbit V1. Existing provider chat material selection remains available. Context is selective, not complete-file or perfect-recall access.
+
+Security: application eligibility/waitlist guards on every new course route, explicit owner checks plus RLS, private drafts, service-only extraction leases, source-ID validation, optimistic updates. No prompt/document content in logs or analytics. Student-confirmed assignments are course records, not automatic personal memories.
+
+Deployment: apply 0015 before shipping this code. Existing smart-context/billing migrations and Orbit migration0014 are prerequisites. LIVE_MODELS and the configured extraction provider/key are required for automatic extraction; manual course creation works without live models. ORBIT_MODE_ENABLED governs routed answers. No production migration, live model call, or deployment was performed during implementation.
+
+Validation: mocked route/provider tests, real local Postgres ownership/confirmation/lease checks, and synthetic desktop/375px course layout checks. The temporary preview route and proxy exception were removed. Signed-in Supabase storage upload and live provider extraction still need staging validation.

@@ -84,3 +84,11 @@ See JAKE_MERGE_FIXES.md for migration-order caveats and validation limits.
 - [ ] Blind quality/cost/latency comparison against individual models before claiming superiority.
 - [ ] Future scope: files, tools, voice, semantic retrieval and full historical browsing in Orbit.
 See ORBIT_MODE.md for contract, limitations and rollout.
+
+## Student workspace and public landing (Jake, October 17)
+- [x] Shared course navigation, syllabus review, source links, assignments, notes, contextual chat.
+- [x] Budgeted, cached extraction; atomic imports; reviewed revisions with optimistic concurrency.
+- [x] Public landing, provisional CAD pricing, accessible institution selector and private interest list.
+- [ ] Apply migrations0015–0016 in staging, verify signed-in uploads and live syllabus extraction.
+- [ ] Confirm legal/contact details, final pricing, school coverage and logo use before public launch.
+See COURSE_WORKSPACE.md and PUBLIC_LANDING.md.

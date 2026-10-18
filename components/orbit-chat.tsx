@@ -37,7 +37,8 @@ function Routing({ decision }: { decision: Decision }) {
   </details>;
 }
 
-export function OrbitChat({ onSelectProvider }: { onSelectProvider: (provider: ProviderId) => void }) {
+export function OrbitChat({ onSelectProvider, onCourses, courseLaunch }: { onSelectProvider: (provider: ProviderId) => void; onCourses?:()=>void; courseLaunch?:(import("@/lib/courses/types").CourseLaunch & {key:number})|null }) {
+  const [course,setCourse]=useState<{id:string;name:string}|null>(null);
   const [chats,setChats]=useState<Chat[]>([]), [active,setActive]=useState<string|null>(null);
   const [messages,setMessages]=useState<Message[]>([]), [input,setInput]=useState("");
   const [busy,setBusy]=useState(false), [loading,setLoading]=useState(false), [phase,setPhase]=useState(""), [error,setError]=useState("");
@@ -58,11 +59,19 @@ export function OrbitChat({ onSelectProvider }: { onSelectProvider: (provider: P
     try {
       const res=await fetch(`/api/orbit?conversationId=${id}`);if(!res.ok)throw new Error();
       const data=await res.json();if(token!==view.current)return;
-      setActive(id);setMessages(data.messages);setDropped(data.olderMessages);setDecision(null);
+      setCourse(data.course??null);setActive(id);setMessages(data.messages);setDropped(data.olderMessages);setDecision(null);
     } catch {if(token===view.current)setError("Could not open this chat. Try again.");}
     finally{if(token===view.current)setLoading(false);}
   }
-  function newChat(){view.current++;setLoading(false);setActive(null);setMessages([]);setDecision(null);setDropped(false);setError("");setSidebar(false);}
+  useEffect(()=>{
+    if(!courseLaunch)return;
+    // A deliberate workspace navigation opens a draft or saved course conversation.
+    setCourse({id:courseLaunch.course.id,name:courseLaunch.course.name}); // eslint-disable-line react-hooks/set-state-in-effect
+    if(courseLaunch.conversationId){void openChat(courseLaunch.conversationId);return;}
+    view.current++;setActive(null);setMessages([]);setDecision(null);setDropped(false);setLoading(false);
+    setInput(courseLaunch.prompt+(courseLaunch.item?`\n\nAssignment: ${courseLaunch.item.title}\nDue: ${courseLaunch.item.due??"unconfirmed"}\n${courseLaunch.item.details}`:""));
+  },[courseLaunch]);
+  function newChat(){setCourse(null);view.current++;setLoading(false);setActive(null);setMessages([]);setDecision(null);setDropped(false);setError("");setSidebar(false);}
   async function deleteChat() {
     if(!active||!window.confirm("Delete this Orbit conversation and its saved history?"))return;
     setLoading(true);
@@ -77,7 +86,7 @@ export function OrbitChat({ onSelectProvider }: { onSelectProvider: (provider: P
     const abort=new AbortController();controller.current=abort;
     const patch=(change:Partial<Message>)=>setMessages(prev=>prev.map(m=>m.id===localReply?{...m,...change}:m));
     try {
-      const res=await fetch("/api/orbit",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({content,...(active?{conversationId:active}:{})}),signal:abort.signal});
+      const res=await fetch("/api/orbit",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({content,...(active?{conversationId:active}:{projectId:course?.id})}),signal:abort.signal});
       if(!res.ok){const d=await res.json();throw new Error(ERRORS[d.error]??"Orbit could not start this turn.");}
       if(!res.body)throw new Error("The response connection could not be opened.");
       const reader=res.body.getReader(),decoder=new TextDecoder();let buffer="",text="";
@@ -109,7 +118,7 @@ export function OrbitChat({ onSelectProvider }: { onSelectProvider: (provider: P
     </nav>
     {sidebar&&<button aria-label="Close chats" onClick={()=>setSidebar(false)} className="fixed inset-0 z-20 bg-surface-000/80 md:hidden"/>}
     <aside className={`${sidebar?"flex":"hidden"} fixed inset-y-0 left-0 z-30 w-64 shrink-0 flex-col border-r border-line bg-surface-100 p-4 md:static md:flex`}>
-      <Wordmark/><p className="mt-1 text-xs text-ink-muted">Orbit mode · Preview</p>
+      <Wordmark/><button onClick={onCourses} disabled={busy} className="mt-3 rounded-xl border border-line px-3 py-2 text-left text-sm">Courses workspace ↗</button><p className="mt-1 text-xs text-ink-muted">Orbit mode · Preview</p>
       <button onClick={newChat} disabled={busy} className="my-5 rounded-xl border border-line px-4 py-2 text-left hover:bg-surface-200 disabled:opacity-50">＋ New Orbit chat</button>
       <div className="flex-1 space-y-1 overflow-y-auto">{chats.map(c=><button key={c.id} onClick={()=>openChat(c.id)} disabled={busy||loading} className={`w-full truncate rounded-xl px-3 py-2 text-left text-sm hover:bg-surface-200 ${active===c.id?"bg-surface-300":""}`}>{c.title}</button>)}{!chats.length&&<p className="px-3 text-sm text-ink-subtle">Your Orbit conversations appear here.</p>}</div>
       <p className="mt-4 text-xs leading-5 text-ink-muted">Your question and selected context go to all four providers. Routing and collaboration count toward your allowance.</p>
@@ -123,7 +132,7 @@ export function OrbitChat({ onSelectProvider }: { onSelectProvider: (provider: P
       </header>
       <div className="min-h-0 flex-1 overflow-y-auto px-4 py-6 sm:px-8">
         <div className="mx-auto max-w-3xl">
-          {!messages.length&&!loading&&<div className="py-8 text-center sm:py-16"><OrbitBackdrop className="mx-auto mb-6 grid h-44 w-44 place-items-center"><span className="text-5xl text-brand">◎</span></OrbitBackdrop><h1 className="text-3xl font-semibold tracking-tight">Four perspectives. One conversation.</h1><p className="mx-auto mt-4 max-w-lg text-sm leading-6 text-ink-muted">ChatGPT, Claude, Gemini and Grok vote on a lead. When three voters request collaboration, one specialist contributes before the lead answers.</p><p className="mt-3 text-xs text-ink-subtle">Text chats for this preview. Files, browsing, tools and voice come later.</p><div className="mt-7 flex flex-wrap justify-center gap-2">{["Explain why confidence intervals are often misunderstood.","Help me plan and critique an argument for my essay."].map(s=><button key={s} onClick={()=>setInput(s)} className="max-w-xs rounded-2xl border border-line px-4 py-3 text-left text-sm hover:bg-surface-100">{s}</button>)}</div></div>}
+          {!messages.length&&!loading&&<div className="py-8 text-center sm:py-16"><OrbitBackdrop className="mx-auto mb-6 grid h-44 w-44 place-items-center"><span className="text-5xl text-brand">◎</span></OrbitBackdrop><h1 className="text-3xl font-semibold tracking-tight">Four perspectives. One conversation.</h1><p className="mx-auto mt-4 max-w-lg text-sm leading-6 text-ink-muted">ChatGPT, Claude, Gemini and Grok vote on a lead. When three voters request collaboration, one specialist contributes before the lead answers.</p><p className="mt-3 text-xs text-ink-subtle">Text chats with selected course excerpts. Direct attachments, browsing, tools and voice come later.</p><div className="mt-7 flex flex-wrap justify-center gap-2">{["Explain why confidence intervals are often misunderstood.","Help me plan and critique an argument for my essay."].map(s=><button key={s} onClick={()=>setInput(s)} className="max-w-xs rounded-2xl border border-line px-4 py-3 text-left text-sm hover:bg-surface-100">{s}</button>)}</div></div>}
           {loading&&<p role="status" className="text-sm text-ink-muted">Opening chat…</p>}
           {dropped&&<p className="mb-5 rounded-xl border border-line p-3 text-xs text-ink-muted">Selected recent context and any available summary are used. Older history may be omitted or partially summarized. This view shows the latest {ORBIT.contextRows} saved messages.</p>}
           {messages.map(m=><article key={m.id} className={`mb-7 ${m.role==="user"?"ml-auto max-w-[90%] rounded-2xl bg-surface-200 p-4":""}`}>
@@ -138,6 +147,7 @@ export function OrbitChat({ onSelectProvider }: { onSelectProvider: (provider: P
         </div>
       </div>
       <form onSubmit={e=>{e.preventDefault();void send();}} className="mx-auto w-full max-w-3xl px-4 pb-4">
+        {course&&<p className="mb-2 text-xs text-ink-muted">Course: {course.name} · Selected course text goes to all four AIs.</p>}
         <div className="rounded-3xl border border-line-strong bg-surface-100 p-3 shadow-composer"><textarea aria-label="Message Orbit" placeholder="Ask Orbit anything…" maxLength={24000} rows={3} value={input} disabled={busy||loading} onChange={e=>setInput(e.target.value)} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey&&!e.nativeEvent.isComposing){e.preventDefault();void send();}}} className="w-full resize-none bg-transparent px-2 py-1 text-base outline-none disabled:opacity-50"/><div className="flex items-center justify-between gap-3"><span className="px-2 text-xs text-ink-muted">4 votes · up to 1 specialist · 1 lead answer</span>{busy?<button type="button" onClick={()=>controller.current?.abort()} className="rounded-full border border-line px-4 py-2 text-sm">Stop</button>:<button disabled={!input.trim()||loading} className="rounded-full bg-brand px-4 py-2 text-sm font-medium text-on-brand disabled:opacity-40">Send</button>}</div></div>
         <p className="mt-2 text-center text-[11px] leading-4 text-ink-subtle">Orbit can make mistakes. Four-model routing adds time and usage; it has not yet been shown to outperform an individual model.</p>
       </form>
